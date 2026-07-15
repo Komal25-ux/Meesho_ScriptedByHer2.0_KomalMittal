@@ -50,7 +50,7 @@ async def transcribe_audio(file_path: str) -> str:
                     files = {"file": ("audio.wav", audio_file, "audio/wav")}
                     headers = {"api-subscription-key": settings.SARVAM_API_KEY}
                     data = {
-                        "model": "saarika:v1",
+                        "model": "saarika:v2.5",
                         "language_code": "hi-IN"
                     }
                     response = await client.post(
@@ -110,16 +110,20 @@ async def synthesize_speech(text: str) -> bytes:
     if settings.SARVAM_API_KEY and "YOUR_SARVAM" not in settings.SARVAM_API_KEY:
         try:
             logger.info("Synthesizing speech using Sarvam Bulbul TTS API...")
+            # Sarvam Bulbul TTS rejects inputs over 500 characters; the Catalog agent's
+            # replies (Didi text + WhatsApp caption) regularly exceed this, so clip at a
+            # word boundary for the voice note while the full text still shows in chat.
+            tts_text = text if len(text) <= 500 else text[:500].rsplit(" ", 1)[0]
             async with httpx.AsyncClient() as client:
                 headers = {
                     "api-subscription-key": settings.SARVAM_API_KEY,
                     "Content-Type": "application/json"
                 }
                 payload = {
-                    "inputs": [text],
+                    "inputs": [tts_text],
                     "target_language_code": "hi-IN",
-                    "speaker": "meera",
-                    "model": "bulbul:v1",
+                    "speaker": "anushka",
+                    "model": "bulbul:v2",
                     "pitch": 0,
                     "pace": 1.00,
                     "loudness": 1.5,

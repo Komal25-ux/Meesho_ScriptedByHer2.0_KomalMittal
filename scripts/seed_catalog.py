@@ -19,7 +19,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 420,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Elegant red Banarasi silk saree with gold zari borders. Perfect for wedding season, festivals, and traditional family occasions."
+        "description": "Elegant red Banarasi silk saree with gold zari borders. Perfect for wedding season, festivals, and traditional family occasions.",
+        "sizes": ["Free Size"],
+        "colors": ["Red", "Gold"],
+        "material": "Banarasi Silk"
     },
     {
         "product_id": "SKU_002",
@@ -29,7 +32,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 280,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Lightweight georgette kurti in deep blue. Features beautiful white embroidery around the neckline, suitable for daily and office wear."
+        "description": "Lightweight georgette kurti in deep blue. Features beautiful white embroidery around the neckline, suitable for daily and office wear.",
+        "sizes": ["S", "M", "L", "XL"],
+        "colors": ["Blue", "White"],
+        "material": "Georgette"
     },
     {
         "product_id": "SKU_003",
@@ -39,7 +45,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 650,
         "return_window_days": 10,
         "cod_available": True,
-        "description": "Flared pink cotton Anarkali suit set with a floral print dupatta. Comfortable for summer wear, casual outings, and daytime functions."
+        "description": "Flared pink cotton Anarkali suit set with a floral print dupatta. Comfortable for summer wear, casual outings, and daytime functions.",
+        "sizes": ["S", "M", "L", "XL", "XXL"],
+        "colors": ["Pink"],
+        "material": "Cotton"
     },
     {
         "product_id": "SKU_004",
@@ -49,7 +58,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 480,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Vibrant yellow Chanderi cotton saree with silver border. Ideal for religious rituals, Haldi ceremonies, and daytime celebrations."
+        "description": "Vibrant yellow Chanderi cotton saree with silver border. Ideal for religious rituals, Haldi ceremonies, and daytime celebrations.",
+        "sizes": ["Free Size"],
+        "colors": ["Yellow", "Silver"],
+        "material": "Chanderi Cotton"
     },
     {
         "product_id": "SKU_005",
@@ -59,7 +71,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 380,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Traditional green straight-fit kurta set with solid color matching trousers. Features delicate zari embroidery detailing."
+        "description": "Traditional green straight-fit kurta set with solid color matching trousers. Features delicate zari embroidery detailing.",
+        "sizes": ["M", "L", "XL"],
+        "colors": ["Green"],
+        "material": "Cotton Blend"
     },
     {
         "product_id": "SKU_006",
@@ -69,7 +84,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 550,
         "return_window_days": 7,
         "cod_available": False,
-        "description": "Trending lightweight organza saree in pastel pink with large floral prints. Highly popular among younger buyers for evening parties."
+        "description": "Trending lightweight organza saree in pastel pink with large floral prints. Highly popular among younger buyers for evening parties.",
+        "sizes": ["Free Size"],
+        "colors": ["Pink"],
+        "material": "Organza"
     },
     {
         "product_id": "SKU_007",
@@ -79,7 +97,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 350,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Classic black regular wear kurti with straight pants. Made of breathable cotton material, ideal for hot Indian summers."
+        "description": "Classic black regular wear kurti with straight pants. Made of breathable cotton material, ideal for hot Indian summers.",
+        "sizes": ["S", "M", "L", "XL"],
+        "colors": ["Black"],
+        "material": "Cotton"
     },
     {
         "product_id": "SKU_008",
@@ -89,7 +110,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 320,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Traditional Rajasthani tie-dye Bandhani saree in red and yellow shades. Ideal for festive pujas, Karwa Chauth, and cultural events."
+        "description": "Traditional Rajasthani tie-dye Bandhani saree in red and yellow shades. Ideal for festive pujas, Karwa Chauth, and cultural events.",
+        "sizes": ["Free Size"],
+        "colors": ["Red", "Yellow"],
+        "material": "Georgette"
     },
     {
         "product_id": "SKU_009",
@@ -99,7 +123,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 410,
         "return_window_days": 10,
         "cod_available": True,
-        "description": "Unstitched cotton-silk suit material with self-design and zari weave borders. Custom stitchable to fit any size specifications."
+        "description": "Unstitched cotton-silk suit material with self-design and zari weave borders. Custom stitchable to fit any size specifications.",
+        "sizes": ["Unstitched - Custom Fit"],
+        "colors": ["Beige", "Gold"],
+        "material": "Cotton Silk"
     },
     {
         "product_id": "SKU_010",
@@ -109,7 +136,10 @@ MOCK_PRODUCTS = [
         "meesho_cost_inr": 310,
         "return_window_days": 7,
         "cod_available": True,
-        "description": "Lucknowi Chikankari work georgette-cotton kurti in white and mint green shades. Very breezy, breathable, and pairs perfectly with denims."
+        "description": "Lucknowi Chikankari work georgette-cotton kurti in white and mint green shades. Very breezy, breathable, and pairs perfectly with denims.",
+        "sizes": ["S", "M", "L", "XL", "XXL"],
+        "colors": ["White", "Mint Green"],
+        "material": "Cotton Georgette"
     }
 ]
 
@@ -157,12 +187,18 @@ def main():
         try:
             print(f"Generating embedding vector for SKU: {prod['product_id']} ({prod['name']})...")
             # Build search string containing name, category, and description
-            text_to_embed = f"Product: {prod['name']}. Category: {prod['category']}. Description: {prod['description']}"
+            text_to_embed = (
+                f"Product: {prod['name']}. Category: {prod['category']}. "
+                f"Description: {prod['description']} "
+                f"Available sizes: {', '.join(prod['sizes'])}. Available colors: {', '.join(prod['colors'])}. "
+                f"Material: {prod['material']}."
+            )
             
             response = genai.embed_content(
-                model="models/text-embedding-004",
+                model="models/gemini-embedding-001",
                 content=text_to_embed,
-                task_type="retrieval_document"
+                task_type="retrieval_document",
+                output_dimensionality=768
             )
             embedding = response['embedding']
             
@@ -176,6 +212,9 @@ def main():
                 "return_window_days": prod["return_window_days"],
                 "cod_available": prod["cod_available"],
                 "description": prod["description"],
+                "sizes": prod["sizes"],
+                "colors": prod["colors"],
+                "material": prod["material"],
                 "embedding": embedding
             }
             

@@ -4,7 +4,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- 2. Resellers Table
 CREATE TABLE IF NOT EXISTS resellers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    whatsapp_number VARCHAR(20) UNIQUE NOT NULL,  -- e.g. "whatsapp:+919876543210" or "whatsapp:+123456"
+    whatsapp_number VARCHAR(30) UNIQUE NOT NULL,  -- e.g. "whatsapp:+919876543210" or "whatsapp:+123456"
     name VARCHAR(100) NOT NULL,
     location VARCHAR(100),                         -- e.g. "Kanpur, UP"
     language VARCHAR(10) DEFAULT 'hi',             -- ISO language code (default hi)
@@ -97,6 +97,9 @@ CREATE TABLE IF NOT EXISTS product_embeddings (
     return_window_days INTEGER DEFAULT 7,
     cod_available BOOLEAN DEFAULT true,
     description TEXT,
+    sizes TEXT[],                                  -- e.g. ARRAY['S','M','L','XL'] or ARRAY['Free Size']
+    colors TEXT[],                                 -- e.g. ARRAY['Yellow','Gold']
+    material VARCHAR(100),                         -- e.g. "Chanderi Cotton"
     embedding VECTOR(768)                          -- Gemini text-embedding-004 has 768 dimensions
 );
 
@@ -115,6 +118,9 @@ RETURNS TABLE (
   return_window_days INTEGER,
   cod_available BOOLEAN,
   description TEXT,
+  sizes TEXT[],
+  colors TEXT[],
+  material VARCHAR(100),
   similarity FLOAT
 )
 LANGUAGE sql STABLE
@@ -128,6 +134,9 @@ AS $$
     return_window_days,
     cod_available,
     description,
+    sizes,
+    colors,
+    material,
     1 - (product_embeddings.embedding <=> query_embedding) as similarity
   FROM product_embeddings
   WHERE 1 - (product_embeddings.embedding <=> query_embedding) > match_threshold

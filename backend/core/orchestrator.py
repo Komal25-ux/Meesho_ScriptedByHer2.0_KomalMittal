@@ -186,9 +186,10 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         try:
             # Query embedding
             embed_res = genai.embed_content(
-                model="models/text-embedding-004",
+                model="models/gemini-embedding-001",
                 content=user_input,
-                task_type="retrieval_query"
+                task_type="retrieval_query",
+                output_dimensionality=768
             )
             embedding = embed_res['embedding']
         except Exception as e:
@@ -297,9 +298,10 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     if configure_gemini():
         try:
             embed_res = genai.embed_content(
-                model="models/text-embedding-004",
+                model="models/gemini-embedding-001",
                 content=user_input,
-                task_type="retrieval_query"
+                task_type="retrieval_query",
+                output_dimensionality=768
             )
             embedding = embed_res['embedding']
         except Exception as e:
@@ -311,7 +313,11 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     reply_text = ""
     if similar_skus:
         context_str = "\n".join([
-            f"Product: {p.get('name')} | Category: {p.get('category')} | Sizes: Free | return: {p.get('return_window_days')} days | Description: {p.get('description')}"
+            f"Product: {p.get('name')} | Category: {p.get('category')} | "
+            f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
+            f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
+            f"Material: {p.get('material') or 'Not specified'} | "
+            f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
             for p in similar_skus
         ])
         

@@ -231,7 +231,10 @@ class SupabaseDB:
                     "meesho_cost_inr": 420,
                     "return_window_days": 7,
                     "cod_available": True,
-                    "description": "Elegant red Banarasi silk saree with gold zari borders."
+                    "description": "Elegant red Banarasi silk saree with gold zari borders.",
+                    "sizes": ["Free Size"],
+                    "colors": ["Red", "Gold"],
+                    "material": "Banarasi Silk"
                 },
                 {
                     "product_id": "SKU_002",
@@ -241,7 +244,10 @@ class SupabaseDB:
                     "meesho_cost_inr": 280,
                     "return_window_days": 7,
                     "cod_available": True,
-                    "description": "Lightweight georgette kurti in deep blue with neckline embroidery."
+                    "description": "Lightweight georgette kurti in deep blue with neckline embroidery.",
+                    "sizes": ["S", "M", "L", "XL"],
+                    "colors": ["Blue", "White"],
+                    "material": "Georgette"
                 }
             ]
         try:

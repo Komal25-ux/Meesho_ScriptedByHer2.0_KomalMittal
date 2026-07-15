@@ -9,8 +9,8 @@
   "scripts": {
     "frontend:dev": "npm run dev --workspace=frontend",
     "frontend:build": "npm run build --workspace=frontend",
-    "backend:dev": "cd backend && uvicorn main:app --reload --port 8000",
-    "backend:start": "cd backend && uvicorn main:app --host 0.0.0.0 --port 8000",
+    "backend:dev": "uvicorn backend.main:app --reload --port 8000",
+    "backend:start": "uvicorn backend.main:app --host 0.0.0.0 --port 8000",
     "seed": "python scripts/seed_catalog.py"
   }
 }

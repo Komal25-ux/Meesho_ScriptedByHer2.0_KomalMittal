@@ -7,3 +7,6 @@ __pycache__/
 dist/
 build/
 *.log
+.claude/
+handoff.md
+updates.txt
