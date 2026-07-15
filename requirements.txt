@@ -1,0 +1,22 @@
+fastapi
+uvicorn
+python-multipart
+httpx
+pydantic
+pydantic-settings
+python-dotenv
+
+# LangGraph + LangChain
+langgraph
+langchain
+langchain-google-genai
+
+# Google Gemini
+google-generativeai
+
+# Supabase
+supabase
+
+# Audio processing
+ffmpeg-python
+websockets
