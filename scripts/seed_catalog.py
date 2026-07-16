@@ -22,7 +22,8 @@ MOCK_PRODUCTS = [
         "description": "Elegant red Banarasi silk saree with gold zari borders. Perfect for wedding season, festivals, and traditional family occasions.",
         "sizes": ["Free Size"],
         "colors": ["Red", "Gold"],
-        "material": "Banarasi Silk"
+        "material": "Banarasi Silk",
+        "base_image_url": "https://images.unsplash.com/photo-1654764746225-e63f5e90facd?w=600&q=80"
     },
     {
         "product_id": "SKU_002",
@@ -35,7 +36,8 @@ MOCK_PRODUCTS = [
         "description": "Lightweight georgette kurti in deep blue. Features beautiful white embroidery around the neckline, suitable for daily and office wear.",
         "sizes": ["S", "M", "L", "XL"],
         "colors": ["Blue", "White"],
-        "material": "Georgette"
+        "material": "Georgette",
+        "base_image_url": "https://images.unsplash.com/photo-1769063382706-8156b3b33eac?w=600&q=80"
     },
     {
         "product_id": "SKU_003",
@@ -48,7 +50,8 @@ MOCK_PRODUCTS = [
         "description": "Flared pink cotton Anarkali suit set with a floral print dupatta. Comfortable for summer wear, casual outings, and daytime functions.",
         "sizes": ["S", "M", "L", "XL", "XXL"],
         "colors": ["Pink"],
-        "material": "Cotton"
+        "material": "Cotton",
+        "base_image_url": "https://images.unsplash.com/photo-1776436817748-f8e10a7e75b0?w=600&q=80"
     },
     {
         "product_id": "SKU_004",
@@ -61,7 +64,8 @@ MOCK_PRODUCTS = [
         "description": "Vibrant yellow Chanderi cotton saree with silver border. Ideal for religious rituals, Haldi ceremonies, and daytime celebrations.",
         "sizes": ["Free Size"],
         "colors": ["Yellow", "Silver"],
-        "material": "Chanderi Cotton"
+        "material": "Chanderi Cotton",
+        "base_image_url": "https://images.unsplash.com/photo-1671741730777-3cb7459a34b3?w=600&q=80"
     },
     {
         "product_id": "SKU_005",
@@ -74,7 +78,8 @@ MOCK_PRODUCTS = [
         "description": "Traditional green straight-fit kurta set with solid color matching trousers. Features delicate zari embroidery detailing.",
         "sizes": ["M", "L", "XL"],
         "colors": ["Green"],
-        "material": "Cotton Blend"
+        "material": "Cotton Blend",
+        "base_image_url": "https://images.unsplash.com/photo-1579413043317-25b7d9a8f3c5?w=600&q=80"
     },
     {
         "product_id": "SKU_006",
@@ -87,7 +92,8 @@ MOCK_PRODUCTS = [
         "description": "Trending lightweight organza saree in pastel pink with large floral prints. Highly popular among younger buyers for evening parties.",
         "sizes": ["Free Size"],
         "colors": ["Pink"],
-        "material": "Organza"
+        "material": "Organza",
+        "base_image_url": "https://images.unsplash.com/photo-1775486101623-3eb0f11d1e37?w=600&q=80"
     },
     {
         "product_id": "SKU_007",
@@ -100,7 +106,8 @@ MOCK_PRODUCTS = [
         "description": "Classic black regular wear kurti with straight pants. Made of breathable cotton material, ideal for hot Indian summers.",
         "sizes": ["S", "M", "L", "XL"],
         "colors": ["Black"],
-        "material": "Cotton"
+        "material": "Cotton",
+        "base_image_url": "https://images.unsplash.com/photo-1708534246055-d7b149acb731?w=600&q=80"
     },
     {
         "product_id": "SKU_008",
@@ -113,7 +120,8 @@ MOCK_PRODUCTS = [
         "description": "Traditional Rajasthani tie-dye Bandhani saree in red and yellow shades. Ideal for festive pujas, Karwa Chauth, and cultural events.",
         "sizes": ["Free Size"],
         "colors": ["Red", "Yellow"],
-        "material": "Georgette"
+        "material": "Georgette",
+        "base_image_url": "https://images.unsplash.com/photo-1604309232579-57b2a96dc946?w=600&q=80"
     },
     {
         "product_id": "SKU_009",
@@ -126,7 +134,8 @@ MOCK_PRODUCTS = [
         "description": "Unstitched cotton-silk suit material with self-design and zari weave borders. Custom stitchable to fit any size specifications.",
         "sizes": ["Unstitched - Custom Fit"],
         "colors": ["Beige", "Gold"],
-        "material": "Cotton Silk"
+        "material": "Cotton Silk",
+        "base_image_url": "https://images.unsplash.com/photo-1623310658847-33f12eaab710?w=600&q=80"
     },
     {
         "product_id": "SKU_010",
@@ -139,7 +148,8 @@ MOCK_PRODUCTS = [
         "description": "Lucknowi Chikankari work georgette-cotton kurti in white and mint green shades. Very breezy, breathable, and pairs perfectly with denims.",
         "sizes": ["S", "M", "L", "XL", "XXL"],
         "colors": ["White", "Mint Green"],
-        "material": "Cotton Georgette"
+        "material": "Cotton Georgette",
+        "base_image_url": "https://images.unsplash.com/photo-1741847639057-b51a25d42892?w=600&q=80"
     }
 ]
 
@@ -215,6 +225,7 @@ def main():
                 "sizes": prod["sizes"],
                 "colors": prod["colors"],
                 "material": prod["material"],
+                "base_image_url": prod["base_image_url"],
                 "embedding": embedding
             }
             

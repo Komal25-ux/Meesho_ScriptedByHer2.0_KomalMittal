@@ -234,7 +234,8 @@ class SupabaseDB:
                     "description": "Elegant red Banarasi silk saree with gold zari borders.",
                     "sizes": ["Free Size"],
                     "colors": ["Red", "Gold"],
-                    "material": "Banarasi Silk"
+                    "material": "Banarasi Silk",
+                    "base_image_url": "https://images.unsplash.com/photo-1654764746225-e63f5e90facd?w=600&q=80"
                 },
                 {
                     "product_id": "SKU_002",
@@ -247,7 +248,8 @@ class SupabaseDB:
                     "description": "Lightweight georgette kurti in deep blue with neckline embroidery.",
                     "sizes": ["S", "M", "L", "XL"],
                     "colors": ["Blue", "White"],
-                    "material": "Georgette"
+                    "material": "Georgette",
+                    "base_image_url": "https://images.unsplash.com/photo-1769063382706-8156b3b33eac?w=600&q=80"
                 }
             ]
         try:

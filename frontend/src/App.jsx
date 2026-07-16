@@ -40,22 +40,54 @@ const CHART_DATA = [
   { day: 'Sun', sales: 2900, profit: 720 },
 ];
 
+const GREETINGS = {
+  reseller: 'Namaste Sunita didi! Main aapki AI Sakhi hu. Bolkar ya likhkar mujhse apne catalog, orders aur returns ki baatein kijiye. 🌸',
+  customer: 'Namaste! Main Sakhi hu. Aap apne order, delivery, ya return ke baare mein pooch sakte hain. 🌸'
+};
+
 export default function App() {
+  const [activeMode, setActiveMode] = useState('reseller'); // 'reseller' or 'customer'
   const [messages, setMessages] = useState([
-    {
-      role: 'assistant',
-      text: 'Namaste Sunita didi! Main aapki AI Sakhi hu. Bolkar ya likhkar mujhse apne catalog, orders aur returns ki baatein kijiye. 🌸',
-      voice_fallback: true
-    }
+    { role: 'assistant', text: GREETINGS.reseller, audio: null, voice_fallback: true }
   ]);
   const [textInput, setTextInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [traceLogs, setTraceLogs] = useState([]);
   const [viewMode, setViewMode] = useState('chat'); // 'chat' or 'trace' on mobile
   const [activeTab, setActiveTab] = useState('logs'); // 'logs' or 'sales' on dashboard
-  
+
   const chatEndRef = useRef(null);
   const wsRef = useRef(null);
+
+  // Fetch a real Sarvam-synthesized greeting whenever the mode switches,
+  // so the welcome message plays real audio instead of falling back to browser TTS.
+  const loadGreeting = async (mode) => {
+    const greetingText = GREETINGS[mode];
+    setMessages([{ role: 'assistant', text: greetingText, audio: null, voice_fallback: true }]);
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/v1/tts/greeting`, { params: { mode } });
+      setMessages([{
+        role: 'assistant',
+        text: greetingText,
+        audio: response.data.audio,
+        voice_fallback: !response.data.audio
+      }]);
+    } catch (err) {
+      console.error("Error pre-fetching greeting audio:", err);
+    }
+  };
+
+  const handleModeSwitch = (mode) => {
+    if (mode === activeMode) return;
+    setActiveMode(mode);
+    loadGreeting(mode);
+  };
+
+  // Fetch real audio for the initial reseller greeting on first mount
+  useEffect(() => {
+    loadGreeting('reseller');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Scroll to bottom of chat
   useEffect(() => {
@@ -129,6 +161,7 @@ export default function App() {
       const formData = new FormData();
       formData.append('text_message', msg);
       formData.append('whatsapp_number', 'whatsapp:+919876543210');
+      formData.append('active_mode', activeMode);
 
       const response = await axios.post(`${API_BASE_URL}/api/v1/chat/send`, formData);
       const data = response.data;
@@ -164,6 +197,7 @@ export default function App() {
       const formData = new FormData();
       formData.append('audio_file', audioBlob, 'reseller_recording.webm');
       formData.append('whatsapp_number', 'whatsapp:+919876543210');
+      formData.append('active_mode', activeMode);
 
       const response = await axios.post(`${API_BASE_URL}/api/v1/chat/send`, formData);
       const data = response.data;
@@ -256,22 +290,16 @@ export default function App() {
                 SD
               </div>
               <div>
-                <h3 className="text-sm font-bold text-meesho-dark">Sunita Didi</h3>
+                <h3 className="text-sm font-bold text-meesho-dark">Sakhi</h3>
                 <span className="text-[10px] text-green-600 flex items-center">
-                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1"></span> Online
+                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1"></span> Sakhi Online
                 </span>
               </div>
             </div>
             
             {/* Reset chat */}
             <button
-              onClick={() => setMessages([
-                {
-                  role: 'assistant',
-                  text: 'Namaste Sunita didi! Bolkar ya likhkar bataiye aaj main kya madad karu? 🌸',
-                  voice_fallback: true
-                }
-              ])}
+              onClick={() => loadGreeting(activeMode)}
               className="text-meesho-jamuni hover:text-meesho-pink border border-transparent p-1.5 rounded-full hover:bg-white transition active:translate-y-[1px]"
               title="Reset Conversation"
             >
@@ -279,33 +307,64 @@ export default function App() {
             </button>
           </div>
 
-          {/* Quick Demos Shortcuts Panel */}
+          {/* Reseller / Customer Mode Toggle */}
+          <div className="bg-meesho-light p-2 border-b border-meesho-dark flex items-center justify-center space-x-2">
+            <button
+              onClick={() => handleModeSwitch('reseller')}
+              className={`flex-1 text-xs font-bold py-1.5 rounded-lg border border-meesho-dark transition ${
+                activeMode === 'reseller'
+                  ? 'bg-meesho-jamuni text-meesho-white shadow-tactile'
+                  : 'bg-meesho-white text-meesho-dark hover:bg-meesho-aam hover:text-white'
+              }`}
+            >
+              Reseller
+            </button>
+            <button
+              onClick={() => handleModeSwitch('customer')}
+              className={`flex-1 text-xs font-bold py-1.5 rounded-lg border border-meesho-dark transition ${
+                activeMode === 'customer'
+                  ? 'bg-meesho-jamuni text-meesho-white shadow-tactile'
+                  : 'bg-meesho-white text-meesho-dark hover:bg-meesho-aam hover:text-white'
+              }`}
+            >
+              Customer
+            </button>
+          </div>
+
+          {/* Quick Uses Shortcuts Panel (mode-conditional) */}
           <div className="bg-meesho-light p-2.5 border-b border-meesho-dark flex items-center space-x-2 overflow-x-auto text-[11px]">
-            <span className="font-bold text-meesho-dark whitespace-nowrap">Demos:</span>
-            <button 
-              onClick={() => triggerDemo("yellow chanderi saree list kardo")}
-              className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-            >
-              Catalog List
-            </button>
-            <button 
-              onClick={() => triggerDemo("kya ye kurti large size me hai?")}
-              className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-            >
-              Customer Qs
-            </button>
-            <button 
-              onClick={() => triggerDemo("weekly analysis dikhao")}
-              className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-            >
-              Growth Coach
-            </button>
-            <button 
-              onClick={() => triggerDemo("saree choti pad rahi hai return ya exchange karna hai")}
-              className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-            >
-              Exchange Return
-            </button>
+            <span className="font-bold text-meesho-dark whitespace-nowrap">Uses:</span>
+            {activeMode === 'reseller' ? (
+              <>
+                <button
+                  onClick={() => triggerDemo("yellow chanderi saree list kardo")}
+                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
+                >
+                  Catalog List
+                </button>
+                <button
+                  onClick={() => triggerDemo("weekly analysis dikhao")}
+                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
+                >
+                  Growth Agent
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => triggerDemo("kya ye kurti large size me hai?")}
+                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
+                >
+                  Customer Qs
+                </button>
+                <button
+                  onClick={() => triggerDemo("saree choti pad rahi hai return ya exchange karna hai")}
+                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
+                >
+                  Exchange/Returns
+                </button>
+              </>
+            )}
           </div>
 
           {/* Scrollable messages zone */}

@@ -16,12 +16,27 @@ router = APIRouter()
 TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp_uploads")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+GREETING_TEXT = {
+    "reseller": "Namaste Sunita didi! Main aapki AI Sakhi hu. Bolkar ya likhkar mujhse apne catalog, orders aur returns ki baatein kijiye. 🌸",
+    "customer": "Namaste! Main Sakhi hu. Aap apne order, delivery, ya return ke baare mein pooch sakte hain. 🌸"
+}
+
+@router.get("/tts/greeting")
+async def tts_greeting(mode: str = Query("reseller")):
+    """Pre-synthesizes the mode-specific welcome message so the UI can play a real
+    Sarvam voice note on load/mode-switch instead of falling back to browser TTS."""
+    text = GREETING_TEXT.get(mode, GREETING_TEXT["reseller"])
+    tts_bytes = await synthesize_speech(text)
+    audio_b64 = base64.b64encode(tts_bytes).decode("utf-8") if tts_bytes else None
+    return {"text": text, "audio": audio_b64}
+
 @router.post("/chat/send")
 async def chat_send(
     user_id: Optional[str] = Form(None),
     whatsapp_number: Optional[str] = Form("whatsapp:+919876543210"),
     text_message: Optional[str] = Form(None),
-    audio_file: Optional[UploadFile] = File(None)
+    audio_file: Optional[UploadFile] = File(None),
+    active_mode: Optional[str] = Form("reseller")
 ):
     try:
         user_input = text_message
@@ -71,12 +86,14 @@ async def chat_send(
             "whatsapp_number": whatsapp_number,
             "raw_input": user_input,
             "input_type": input_type,
+            "active_mode": active_mode or "reseller",
             "reseller_name": "",
             "reseller_location": "",
             "reseller_language": "",
             "reseller_dialect": "",
             "detected_intent": "",
             "intent_confidence": 0.0,
+            "pending_route": "",
             "reply_text": "",
             "reply_audio_b64": None,
             "reply_image_url": None,

@@ -1,11 +1,37 @@
 import os
+import re
 import subprocess
 import logging
 import httpx
-import google.generativeai as genai
 from backend.config import settings
+from backend.core.gemini_utils import generate_with_fallback
 
 logger = logging.getLogger("sakhi-backend")
+
+# Sarvam Bulbul TTS mispronounces/garbles emoji glyphs; the chat UI still needs
+# them (they render fine in text bubbles), so we only strip them for the voice payload.
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\U00002600-\U000026FF"
+    "\U00002700-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF"
+    "\uFE0F"
+    "\u200D"
+    "]+",
+    flags=re.UNICODE
+)
+
+def strip_emojis(text: str) -> str:
+    cleaned = _EMOJI_PATTERN.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 async def convert_to_wav(input_file_path: str) -> str:
     """
@@ -71,33 +97,20 @@ async def transcribe_audio(file_path: str) -> str:
         except Exception as e:
             logger.error(f"Sarvam ASR API exception: {e}")
 
-    # Fallback: Google Gemini 2.5 Flash
-    if settings.GEMINI_API_KEY and "YOUR_GEMINI" not in settings.GEMINI_API_KEY:
-        try:
-            logger.info("ASR Fallback: Transcribing audio with Google Gemini 2.5 Flash...")
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            
-            with open(file_path, "rb") as audio_file:
-                audio_bytes = audio_file.read()
+    # Fallback: Gemini multimodal audio transcription (tries a chain of models)
+    with open(file_path, "rb") as audio_file:
+        audio_bytes = audio_file.read()
 
-            model = genai.GenerativeModel(settings.GEMINI_MODEL)
-            prompt = (
-                "You are an ASR system. Listen to this audio recording of an Indian reseller. "
-                "Transcribe exactly what they say in Hindi, outputting standard text. Do not summarize or reply. "
-                "If they speak Hindi words in English letters (Hinglish), transcribe it in natural Hindi script (Devanagari) or Hinglish as they spoke it."
-            )
-            
-            response = model.generate_content([
-                prompt,
-                {"mime_type": "audio/wav", "data": audio_bytes}
-            ])
-            
-            transcription = response.text.strip()
-            logger.info(f"Gemini ASR Success: {transcription}")
-            return transcription
-        except Exception as e:
-            logger.error(f"Gemini ASR transcription failed: {e}")
-            
+    prompt = (
+        "You are an ASR system. Listen to this audio recording of an Indian reseller. "
+        "Transcribe exactly what they say in Hindi, outputting standard text. Do not summarize or reply. "
+        "If they speak Hindi words in English letters (Hinglish), transcribe it in natural Hindi script (Devanagari) or Hinglish as they spoke it."
+    )
+    transcription = generate_with_fallback([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
+    if transcription:
+        logger.info(f"Gemini ASR Success: {transcription}")
+        return transcription
+
     logger.warning("No ASR methods succeeded. Returning empty transcription.")
     return ""
 
@@ -110,10 +123,13 @@ async def synthesize_speech(text: str) -> bytes:
     if settings.SARVAM_API_KEY and "YOUR_SARVAM" not in settings.SARVAM_API_KEY:
         try:
             logger.info("Synthesizing speech using Sarvam Bulbul TTS API...")
+            # Sarvam mispronounces emoji glyphs, so strip them for the voice payload only
+            # (the chat UI still shows the original text with emojis intact).
+            clean_text = strip_emojis(text)
             # Sarvam Bulbul TTS rejects inputs over 500 characters; the Catalog agent's
             # replies (Didi text + WhatsApp caption) regularly exceed this, so clip at a
             # word boundary for the voice note while the full text still shows in chat.
-            tts_text = text if len(text) <= 500 else text[:500].rsplit(" ", 1)[0]
+            tts_text = clean_text if len(clean_text) <= 500 else clean_text[:500].rsplit(" ", 1)[0]
             async with httpx.AsyncClient() as client:
                 headers = {
                     "api-subscription-key": settings.SARVAM_API_KEY,
@@ -122,12 +138,16 @@ async def synthesize_speech(text: str) -> bytes:
                 payload = {
                     "inputs": [tts_text],
                     "target_language_code": "hi-IN",
+                    # Reverted to "anushka" - the "manisha" swap sounded worse in practice.
+                    # Natural pace (1.0) and the highest sample rate Sarvam accepts for
+                    # bulbul:v2 (24kHz) for clean, artifact-free playback.
                     "speaker": "anushka",
                     "model": "bulbul:v2",
                     "pitch": 0,
-                    "pace": 1.00,
+                    "pace": 1.0,
                     "loudness": 1.5,
-                    "enable_preprocessing": True
+                    "enable_preprocessing": True,
+                    "speech_sample_rate": 24000
                 }
                 response = await client.post(
                     "https://api.sarvam.ai/text-to-speech",

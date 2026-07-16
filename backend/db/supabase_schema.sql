@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS product_embeddings (
     sizes TEXT[],                                  -- e.g. ARRAY['S','M','L','XL'] or ARRAY['Free Size']
     colors TEXT[],                                 -- e.g. ARRAY['Yellow','Gold']
     material VARCHAR(100),                         -- e.g. "Chanderi Cotton"
+    base_image_url TEXT,                           -- real stock photo of the product (not AI-generated)
     embedding VECTOR(768)                          -- Gemini text-embedding-004 has 768 dimensions
 );
 
@@ -121,6 +122,7 @@ RETURNS TABLE (
   sizes TEXT[],
   colors TEXT[],
   material VARCHAR(100),
+  base_image_url TEXT,
   similarity FLOAT
 )
 LANGUAGE sql STABLE
@@ -137,6 +139,7 @@ AS $$
     sizes,
     colors,
     material,
+    base_image_url,
     1 - (product_embeddings.embedding <=> query_embedding) as similarity
   FROM product_embeddings
   WHERE 1 - (product_embeddings.embedding <=> query_embedding) > match_threshold

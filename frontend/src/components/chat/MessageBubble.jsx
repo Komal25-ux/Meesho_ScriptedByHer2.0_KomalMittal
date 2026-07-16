@@ -18,7 +18,9 @@ export default function MessageBubble({ message }) {
 
     if (audio) {
       // Play Base64 Audio
-      const snd = new Audio(`data:audio/mp3;base64,${audio}`);
+      // Sarvam Bulbul returns raw WAV (RIFF/PCM), not mp3 - mislabeling this
+      // caused playback artifacts/failures in stricter browsers.
+      const snd = new Audio(`data:audio/wav;base64,${audio}`);
       setAudioObj(snd);
       setIsPlaying(true);
       snd.play();

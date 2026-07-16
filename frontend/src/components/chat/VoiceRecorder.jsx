@@ -82,7 +82,7 @@ export default function VoiceRecorder({ onSendAudio, isLoading }) {
             ) : (
               <>
                 <Mic className="w-4 h-4 text-meesho-white" />
-                <span className="font-bold">Daba kar bolein (Hindi Voice)</span>
+                <span className="font-bold">Bolne ke liye dabayein</span>
               </>
             )}
           </button>
