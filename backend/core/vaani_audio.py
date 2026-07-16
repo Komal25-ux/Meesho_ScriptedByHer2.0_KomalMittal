@@ -8,30 +8,20 @@ from backend.core.gemini_utils import generate_with_fallback
 
 logger = logging.getLogger("sakhi-backend")
 
-# Sarvam Bulbul TTS mispronounces/garbles emoji glyphs; the chat UI still needs
-# them (they render fine in text bubbles), so we only strip them for the voice payload.
-_EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F300-\U0001F5FF"
-    "\U0001F600-\U0001F64F"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FAFF"
-    "\U00002600-\U000026FF"
-    "\U00002700-\U000027BF"
-    "\U0001F1E6-\U0001F1FF"
-    "\U00002B00-\U00002BFF"
-    "\uFE0F"
-    "\u200D"
-    "]+",
-    flags=re.UNICODE
-)
+# Sarvam Bulbul TTS mispronounces/garbles emoji glyphs and tries to read markdown
+# formatting characters aloud, and reads "\u20B9" unreliably. Rather than blacklist
+# each offending category separately, whitelist what's actually safe to speak:
+# Latin alphanumerics, the Devanagari block (incl. its own punctuation, danda
+# "\u0964" and double-danda "\u0965"), spaces, and basic sentence punctuation. Currency
+# is normalized to spoken words first, since "\u20B9" itself falls outside the
+# whitelist and would otherwise just vanish instead of being read as "rupaye".
+_RUPEE_PATTERN = re.compile(r"\u20B9\s?(\d[\d,]*)")
+_TTS_WHITELIST_PATTERN = re.compile(r"[^a-zA-Z0-9\u0900-\u097F\u0964\u0965 ,.?!]")
 
-def strip_emojis(text: str) -> str:
-    cleaned = _EMOJI_PATTERN.sub("", text)
-    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+def sanitize_for_tts(text: str) -> str:
+    text = _RUPEE_PATTERN.sub(lambda m: f"{m.group(1).replace(',', '')} \u0930\u0941\u092A\u092F\u0947", text)
+    text = _TTS_WHITELIST_PATTERN.sub(" ", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 async def convert_to_wav(input_file_path: str) -> str:
     """
@@ -123,9 +113,12 @@ async def synthesize_speech(text: str) -> bytes:
     if settings.SARVAM_API_KEY and "YOUR_SARVAM" not in settings.SARVAM_API_KEY:
         try:
             logger.info("Synthesizing speech using Sarvam Bulbul TTS API...")
-            # Sarvam mispronounces emoji glyphs, so strip them for the voice payload only
-            # (the chat UI still shows the original text with emojis intact).
-            clean_text = strip_emojis(text)
+            # Sanitize for the voice payload only - the chat UI still shows the
+            # original text with emojis/markdown/₹ intact. Applied here (not at
+            # each call site) so it's a deterministic safety net regardless of
+            # which Gemini fallback model produced the text or how well it
+            # followed the phonetic prompt rules.
+            clean_text = sanitize_for_tts(text)
             # Sarvam Bulbul TTS rejects inputs over 500 characters; the Catalog agent's
             # replies (Didi text + WhatsApp caption) regularly exceed this, so clip at a
             # word boundary for the voice note while the full text still shows in chat.

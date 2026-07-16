@@ -1,12 +1,13 @@
 import time
 import json
 import logging
-from typing import TypedDict, Optional, List, Dict, Any
+from typing import TypedDict, Optional, List, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
+from pydantic import BaseModel, ValidationError
 import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
-from backend.core.gemini_utils import configure_gemini, generate_with_fallback
+from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse
 from backend.core.image_compositor import generate_ad_creative
 
 logger = logging.getLogger("sakhi-backend")
@@ -26,8 +27,58 @@ PENDING_LISTINGS: Dict[str, Dict[str, Any]] = {}
 def _pending_key(whatsapp_number: str, active_mode: str) -> str:
     return f"{whatsapp_number}::{active_mode}"
 
+# Kept only as the last-resort fallback for classify_approval_intent() below,
+# used if the Gemini call itself is unreachable. The primary router is an LLM
+# classification, not keyword matching - see classify_approval_intent().
 AFFIRMATIVE_KEYWORDS = ["haan", "haa", "ha ", "yes", "kar do", "kardo", "confirm", "post kar", "theek hai", "thik hai", "ok", "okay", "sahi hai", "post karo", "chalo"]
 NEGATIVE_KEYWORDS = ["nahi", "no", "cancel", "mat karo", "ruko", "rehne do", "abhi nahi"]
+
+class ApprovalIntent(BaseModel):
+    intent: Literal["approve", "modify", "new_request"]
+
+def classify_approval_intent(user_input: str, pending: Dict[str, Any]) -> str:
+    """Semantic router for a reply to a pending catalog draft, replacing keyword
+    matching that collided on "kar do"/"kardo" - a phrase that shows up equally
+    in a genuine approval ("haan kar do"), a price edit ("price 599 kardo"), and
+    an ordinary new listing request ("blue kurti list kardo"). An LLM call can
+    actually tell these apart from context; a keyword substring check can't."""
+    prompt = f"""You are an intent router for a Hindi/Hinglish e-commerce bot. The reseller has a pending catalog draft waiting for approval:
+
+Product: {pending.get('matched_product_name')}
+Current Price: ₹{pending.get('selling_price')}
+
+The reseller just said: "{user_input}"
+
+Classify their response into EXACTLY ONE of these buckets:
+- "approve": they want to post/confirm the draft as-is (e.g. "haan kar do", "post kar do", "theek hai", "confirm").
+- "modify": they want to change the price or details of THIS SAME draft (e.g. "nahi, price 599 kar do", "isse 799 me list kar do", "price kam karo").
+- "new_request": they are ignoring this draft entirely and asking about something else - a different item, or an unrelated request (e.g. "blue kurti list kardo", "weekly sales dikhao", "nahi rehne do", "customer ne return maanga").
+
+Output ONLY valid JSON: {{"intent": "approve" | "modify" | "new_request"}}"""
+
+    raw_text = generate_with_fallback(prompt)
+    if raw_text:
+        try:
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            parsed = ApprovalIntent(**json.loads(cleaned))
+            return parsed.intent
+        except (json.JSONDecodeError, ValidationError, KeyError) as e:
+            logger.warning(f"Approval intent classification failed to parse ({e}); using keyword fallback.")
+
+    # Emergency fallback only - used if Gemini is entirely unreachable, so the
+    # human-in-the-loop flow doesn't hard-fail with no path forward.
+    lower = user_input.strip().lower()
+    if any(k in lower for k in AFFIRMATIVE_KEYWORDS) and not _extract_price(user_input):
+        return "approve"
+    if _extract_price(user_input):
+        return "modify"
+    if any(k in lower for k in NEGATIVE_KEYWORDS):
+        return "new_request"
+    return "new_request"
 
 class SakhiState(TypedDict):
     reseller_id: str
@@ -53,6 +104,10 @@ class SakhiState(TypedDict):
     reply_text: str
     reply_audio_b64: Optional[str]
     reply_image_url: Optional[str]
+    # Pure Devanagari version of reply_text for Sarvam TTS (dual-output from
+    # the same LLM call as reply_text). Falls back to reply_text at the API
+    # layer if a node doesn't set this (e.g. deterministic template replies).
+    reply_tts_text: Optional[str]
 
     # Set when a catalog listing was just finalized this turn, so the API
     # layer can broadcast the post into the Customer segment's chat.
@@ -113,18 +168,17 @@ def _extract_price(text: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 def check_pending_approval(state: SakhiState) -> SakhiState:
-    """If a catalog draft is awaiting the reseller's Haan/Nahi confirmation,
-    intercept the turn here instead of running intent detection, so the graph
-    genuinely pauses on the draft until the reseller responds to it. A price
-    mentioned in the reply (e.g. "Nahi, price 599 kar do") is treated as a
-    modification request and takes priority over yes/no keywords, since
-    "kar do" and "nahi" can both appear inside a price-change message."""
+    """If a catalog draft is awaiting the reseller's approval, intercept the
+    turn here instead of running intent detection, so the graph genuinely
+    pauses on the draft until the reseller responds to it. The response is
+    classified by an LLM (approve / modify / new_request) rather than keyword
+    matching, since phrases like "kar do"/"kardo" show up identically in a
+    genuine approval, a price edit, and an unrelated new listing request."""
     t_start = time.time()
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
     reseller_name = state.get("reseller_name", "Sunita Didi")
     raw_input = state.get("raw_input", "")
-    user_input = raw_input.strip().lower()
 
     pending_key = _pending_key(whatsapp_number, active_mode)
     pending = PENDING_LISTINGS.get(pending_key)
@@ -132,43 +186,52 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
         state["pending_route"] = "not_pending"
         return state
 
-    new_price = _extract_price(raw_input)
+    intent = classify_approval_intent(raw_input, pending)
+    classifier_intent_for_log = intent
 
-    if new_price and new_price != pending["selling_price"] and new_price > pending["cost"]:
-        new_caption = generate_whatsapp_caption(
-            reseller_name, pending["matched_product_name"], pending.get("matched_product_description", ""), new_price
-        )
-        pending["selling_price"] = new_price
-        pending["listing_payload"]["selling_price_inr"] = new_price
-        pending["listing_payload"]["whatsapp_caption"] = new_caption
-        PENDING_LISTINGS[pending_key] = pending
-
-        state["reply_text"] = (
-            f"Theek hai Didi, price update kar diya. *{pending['matched_product_name']}* ab "
-            f"₹{new_price} me list hoga (profit ₹{new_price - pending['cost']}).\n\n{new_caption}\n\n"
-            f"Kya ab main isey post karun?"
-        )
-        state["reply_image_url"] = pending["base_image_url"]
-        state["detected_intent"] = "CATALOG"
-        state["pending_route"] = "price_updated"
-    elif any(k in user_input for k in AFFIRMATIVE_KEYWORDS):
+    if intent == "approve":
         state["pending_route"] = "finalize"
-    elif any(k in user_input for k in NEGATIVE_KEYWORDS):
+    elif intent == "modify":
+        new_price = _extract_price(raw_input)
+        if new_price and new_price > pending["cost"]:
+            new_caption = generate_whatsapp_caption(
+                reseller_name, pending["matched_product_name"], pending.get("matched_product_description", ""), new_price
+            )
+            pending["selling_price"] = new_price
+            pending["listing_payload"]["selling_price_inr"] = new_price
+            pending["listing_payload"]["whatsapp_caption"] = new_caption.ui_text
+            pending["matched_product_name_tts"] = new_caption.product_name_tts
+            PENDING_LISTINGS[pending_key] = pending
+
+            state["reply_text"] = (
+                f"Theek hai Didi, price update kar diya. *{pending['matched_product_name']}* ab "
+                f"₹{new_price} me list hoga (profit ₹{new_price - pending['cost']}).\n\n{new_caption.ui_text}\n\n"
+                f"Kya ab main isey post karun?"
+            )
+            state["reply_tts_text"] = (
+                f"ठीक है दीदी, प्राइस अपडेट कर दिया। {new_caption.product_name_tts} अब "
+                f"{new_price} रुपये में लिस्ट होगा, प्रॉफिट {new_price - pending['cost']} रुपये होगा।\n\n{new_caption.tts_text}\n\n"
+                f"क्या अब मैं इसे पोस्ट करूं?"
+            )
+            state["reply_image_url"] = pending["base_image_url"]
+            state["detected_intent"] = "CATALOG"
+            state["pending_route"] = "price_updated"
+        else:
+            # Classifier said "modify" but no usable price was found in the text
+            # (or it wasn't above cost) - re-ask instead of silently no-op'ing.
+            state["reply_text"] = (
+                f"Didi, *{pending['matched_product_name']}* ke liye naya price kya rakhun? "
+                f"(Abhi ₹{pending['selling_price']} hai, cost ₹{pending['cost']} se zyada hona chahiye)"
+            )
+            state["reply_tts_text"] = (
+                f"दीदी, {pending.get('matched_product_name_tts', pending['matched_product_name'])} के लिए नया प्राइस क्या रखूं? "
+                f"अभी {pending['selling_price']} रुपये है, कॉस्ट {pending['cost']} रुपये से ज़्यादा होना चाहिए।"
+            )
+            state["detected_intent"] = "CATALOG"
+            state["pending_route"] = "still_pending"
+    else:  # "new_request" - abandon this draft, let the turn flow through normally
         PENDING_LISTINGS.pop(pending_key, None)
-        state["reply_text"] = (
-            f"Theek hai Didi, maine *{pending['matched_product_name']}* post nahi kiya. "
-            f"Jab ready ho tab naya item batayein."
-        )
-        state["detected_intent"] = "CATALOG"
-        state["pending_route"] = "declined"
-    else:
-        state["reply_text"] = (
-            f"Didi, pehle ye bataiye - *{pending['matched_product_name']}* wali listing "
-            f"(₹{pending['selling_price']}) post kar du? Haan ya Nahi bol dijiye. "
-            f"Ya price badalna hai to naya price bata dijiye."
-        )
-        state["detected_intent"] = "CATALOG"
-        state["pending_route"] = "still_pending"
+        state["pending_route"] = "not_pending"
 
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -176,7 +239,11 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
         "agent": "Orchestrator",
         "action": "Pending Catalog Approval Check",
         "latency_ms": latency,
-        "data": {"pending_route": state["pending_route"], "trigger_text": state.get("raw_input", "")}
+        "data": {
+            "classifier_intent": classifier_intent_for_log,
+            "pending_route": state["pending_route"],
+            "trigger_text": state.get("raw_input", "")
+        }
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
@@ -313,9 +380,15 @@ Output ONLY a valid JSON block of the format:
 def route_decision(state: SakhiState) -> str:
     return state.get("detected_intent", "GENERAL")
 
-def generate_whatsapp_caption(reseller_name: str, product_name: str, product_description: str, selling_price: int) -> str:
+def generate_whatsapp_caption(reseller_name: str, product_name: str, product_description: str, selling_price: int) -> CatalogCaptionResponse:
     """Shared by the initial catalog draft and price-renegotiation so the caption
-    always reflects the current selling price."""
+    always reflects the current selling price. Returns the Hinglish caption
+    (posted to WhatsApp as-is, and shown in chat), a Devanagari version for when
+    this caption is read aloud, and a phonetic Devanagari transliteration of the
+    product name alone - CRITICAL TTS RULE: callers that echo the product name
+    back in a wrapper sentence (e.g. "Didi, <name> ke liye ... ready hai") must
+    use product_name_tts there, never the raw Latin-script name, or Sarvam reads
+    it with English stress patterns even inside an otherwise Devanagari sentence."""
     catalog_prompt = f"""
 You are 'Catalog Didi', the assistant for a Meesho reseller named {reseller_name}.
 Write an engaging, persuasive WhatsApp promotional post for the product below:
@@ -324,16 +397,17 @@ Material/Details: {product_description}
 Selling Price: ₹{selling_price} (Reseller Final Price to customer)
 
 Rules:
-- Write in warm Hinglish (Hindi written in English alphabets).
-- Include emojis, customer interest hooks, and call-to-actions.
-- Do NOT exceed 5 lines.
-- End strictly with: "Order karne ke liye mujhe WhatsApp message karein! 🌸"
+- ui_text: Write in warm Hinglish (Hindi written in English alphabets). Include emojis, customer interest hooks, and call-to-actions. Do NOT exceed 5 lines. End strictly with: "Order karne ke liye mujhe WhatsApp message karein! 🌸"
+- tts_text: CRITICAL - this must be 100% pure Devanagari script, zero English/Latin words or letters anywhere in it, including the product name (transliterate it into Devanagari too, e.g. "Yellow Chanderi Saree" -> "येलो चंदेरी साड़ी"). This is a strict translation task, not a rewrite - translate ui_text sentence by sentence, leaving nothing in Latin script. No emojis, no markdown symbols (*, _, #), and no "₹" - spell prices as "<number> रुपये" instead.
+- Never write "AI Sakhi" in tts_text - spell it phonetically as "ए आई सखी".
+- product_name_tts: CRITICAL TTS RULE - transliterate ONLY the product name "{product_name}" phonetically into Devanagari (preserve how it sounds in English, e.g. "Blue Cotton Kurti" -> "ब्लू कॉटन कुर्ती"), NOT a meaning translation.
 """
-    caption = generate_with_fallback(catalog_prompt)
-    if caption:
-        return caption
+    result = generate_structured_with_fallback(catalog_prompt, CatalogCaptionResponse)
+    if result:
+        return result
 
-    return f"🌸 *{product_name}* 🌸\n✨ Bahut hi pyaara fabric aur premium quality!\n💸 Final Price: ₹{selling_price}\nOrder karne ke liye mujhe WhatsApp message karein! 🌸"
+    fallback = f"🌸 *{product_name}* 🌸\n✨ Bahut hi pyaara fabric aur premium quality!\n💸 Final Price: ₹{selling_price}\nOrder karne ke liye mujhe WhatsApp message karein! 🌸"
+    return CatalogCaptionResponse(ui_text=fallback, tts_text=fallback, product_name_tts=product_name)
 
 # ── NODE 3: CATALOG AGENT (Drafts only - human-in-the-loop approval required) ──
 def run_catalog_agent(state: SakhiState) -> SakhiState:
@@ -397,11 +471,11 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "image_url": base_image_url
         }
 
-        # Generate WhatsApp promotion in Hinglish
-        whatsapp_caption = generate_whatsapp_caption(
+        # Generate WhatsApp promotion in Hinglish (+ Devanagari for TTS)
+        caption_response = generate_whatsapp_caption(
             reseller_name, matched_product.get("name"), matched_product.get("description", ""), selling_price
         )
-        listing_payload["whatsapp_caption"] = whatsapp_caption
+        listing_payload["whatsapp_caption"] = caption_response.ui_text
 
         # Human-in-the-loop: hold the draft and wait for explicit reseller approval
         # before it's saved/posted (see check_pending_approval / finalize_catalog_listing).
@@ -409,6 +483,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "listing_payload": listing_payload,
             "base_image_url": base_image_url,
             "matched_product_name": matched_product.get("name"),
+            "matched_product_name_tts": caption_response.product_name_tts,
             "matched_product_description": matched_product.get("description", ""),
             "selling_price": selling_price,
             "cost": cost,
@@ -417,14 +492,22 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         reply_text = (
             f"Didi, *{matched_product.get('name')}* ke liye caption aur price ready hai. "
             f"Price: ₹{selling_price} (aapka profit ₹{selling_price - cost} hoga).\n\n"
-            f"{whatsapp_caption}\n\n"
+            f"{caption_response.ui_text}\n\n"
             f"Kya main isey post karun?"
+        )
+        reply_tts_text = (
+            f"दीदी, {caption_response.product_name_tts} के लिए कैप्शन और प्राइस तैयार है। "
+            f"प्राइस: {selling_price} रुपये, आपका प्रॉफिट {selling_price - cost} रुपये होगा।\n\n"
+            f"{caption_response.tts_text}\n\n"
+            f"क्या मैं इसे पोस्ट करूं?"
         )
         state["reply_image_url"] = base_image_url
     else:
         reply_text = "Maaf kijiyega didi, mujhe catalog me is tarah ka koi kapda ya item nahi mila. Kya aap details check karke firse bolengi?"
+        reply_tts_text = "माफ़ कीजियेगा दीदी, मुझे कैटलॉग में इस तरह का कोई कपड़ा या आइटम नहीं मिला। क्या आप डिटेल्स चेक करके फिर से बोलेंगी?"
 
     state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
 
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -485,7 +568,14 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
         + ("Maine iske liye ek promotional ad image bhi banayi hai! 🌸" if ad_image_url
            else "Aapki listing product photo ke saath live hai! 🌸")
     )
+    reply_tts_text = (
+        f"हो गया दीदी! {pending.get('matched_product_name_tts', pending['matched_product_name'])} "
+        f"{pending['selling_price']} रुपये में लाइव पोस्ट हो गया है, प्रॉफिट {pending['selling_price'] - pending['cost']} रुपये होगा।\n\n"
+        + ("मैंने इसके लिए एक प्रोमोशनल ऐड इमेज भी बनायी है।" if ad_image_url
+           else "आपकी लिस्टिंग प्रोडक्ट फोटो के साथ लाइव है।")
+    )
     state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
     state["reply_image_url"] = final_image_url
     state["detected_intent"] = "CATALOG"
     # Flags the API layer to broadcast this post into the Customer segment's
@@ -541,6 +631,10 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     
     reply_text = ""
     if similar_skus:
+        # Show the real product photo alongside the answer - buyers asking
+        # "kya ye kurti L size me hai?" expect to see the item, not just text.
+        state["reply_image_url"] = similar_skus[0].get("base_image_url")
+
         context_str = "\n".join([
             f"Product: {p.get('name')} | Category: {p.get('category')} | "
             f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
@@ -561,20 +655,26 @@ USER QUERY:
 "{user_input}"
 
 Rules:
-- Respond in polite, friendly conversational Hindi (or Hinglish).
 - Keep it concise.
-- If the context does not contain the answer (e.g. they ask for custom color or size not mentioned), you MUST say EXACTLY: "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
+- If the context does not contain the answer (e.g. they ask for custom color or size not mentioned), ui_text MUST be EXACTLY: "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu." (and tts_text its natural Devanagari equivalent).
 - Do NOT make up any details or facts outside the context.
+- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी"). Keep responses strictly under 2 short sentences to ensure fast voice delivery.
+- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
 """
-        reply_text = generate_with_fallback(customer_prompt) or ""
+        result = generate_structured_with_fallback(customer_prompt, AgentResponse)
+        reply_text = result.ui_text if result else ""
+        reply_tts_text = result.tts_text if result else ""
 
         if not reply_text:
-            reply_text = f"Ji Didi, main check karke batati hu. Custom specifications ke liye hume confirmation leni hogi."
+            reply_text = "Ji Didi, main check karke batati hu. Custom specifications ke liye hume confirmation leni hogi."
+            reply_tts_text = "जी दीदी, मैं चेक करके बताती हूँ। कस्टम स्पेसिफिकेशंस के लिए हमें कन्फर्मेशन लेनी होगी।"
     else:
         # Default safety fallback
         reply_text = "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
-        
+        reply_tts_text = "माफ़ कीजियेगा, मेरे पास अभी इसकी डिटेल नहीं है। मैं दीदी से पूछ कर बताती हूँ।"
+
     state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
     
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -619,13 +719,19 @@ Rules:
 - Start with a warm greeting (e.g. "Namaste Sunita Didi!").
 - Give them simple tips to sell more sarees/kurtis this week (e.g., share on WhatsApp stories in the afternoon, message top 5 repeat buyers).
 - Keep it encouraging and under 6 lines.
+- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी").
+- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
 """
-    reply_text = generate_with_fallback(growth_prompt) or ""
-            
+    result = generate_structured_with_fallback(growth_prompt, AgentResponse)
+    reply_text = result.ui_text if result else ""
+    reply_tts_text = result.tts_text if result else ""
+
     if not reply_text:
         reply_text = f"Namaste {reseller_name} didi! Is hafte aapki sales ₹{analytics.get('sales_this_week_inr')} rahi aur profit ₹{analytics.get('profit_this_week_inr')} hai. Aap WhatsApp stories par kurtis share karke orders badha sakti hain!"
-        
+        reply_tts_text = f"नमस्ते {reseller_name} दीदी! इस हफ्ते आपकी सेल्स {analytics.get('sales_this_week_inr')} रुपये रही और प्रॉफिट {analytics.get('profit_this_week_inr')} रुपये है। आप व्हाट्सएप स्टोरीज़ पर कुर्तियां शेयर करके ऑर्डर्स बढ़ा सकती हैं!"
+
     state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
     
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -675,14 +781,19 @@ Rules:
 - Sympathize with the size/fit issue.
 - Offer them a free size exchange or replacement instead of processing a direct refund.
 - Tell them: "Refund ki jagah hum aapko size change karke bhej dete hain, jisse aapko naya stock pasand aaye!"
-- Do not exceed 4 lines.
+- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी"). Keep responses strictly under 2 short sentences to ensure fast voice delivery.
+- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
 """
-    reply_text = generate_with_fallback(returns_prompt) or ""
-            
+    result = generate_structured_with_fallback(returns_prompt, AgentResponse)
+    reply_text = result.ui_text if result else ""
+    reply_tts_text = result.tts_text if result else ""
+
     if not reply_text:
         reply_text = "Maaf kijiyega didi customer ko size problem aayi. Hum unko product refund ke badle doosra size free exchange me bhej dete hain!"
-        
+        reply_tts_text = "माफ़ कीजियेगा दीदी, कस्टमर को साइज़ प्रॉब्लम आयी। हम उनको प्रोडक्ट रिफंड के बदले दूसरा साइज़ फ्री एक्सचेंज में भेज देते हैं!"
+
     state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
     
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -724,13 +835,19 @@ Capabilities you have:
 4. Exchange / Return support
 
 Keep your greeting warm, clear, and under 5 lines.
+- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी").
+- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
 """
-    reply_text = generate_with_fallback(prompt) or ""
+    result = generate_structured_with_fallback(prompt, AgentResponse)
+    reply_text = result.ui_text if result else ""
+    reply_tts_text = result.tts_text if result else ""
 
     if not reply_text:
         reply_text = f"Namaste {reseller_name} didi! Main aapki business Sakhi hu. Main catalog items list kar sakti hu, customer queries solve kar sakti hu, aur returns handle kar sakti hu. Bataiye kya madad karu?"
-        
+        reply_tts_text = f"नमस्ते {reseller_name} दीदी! मैं आपकी बिज़नेस सखी हूँ। मैं कैटलॉग आइटम्स लिस्ट कर सकती हूँ, कस्टमर क्वेरीज़ सॉल्व कर सकती हूँ, और रिटर्न्स हैंडल कर सकती हूँ। बताइये क्या मदद करूं?"
+
     state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
     
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -816,7 +933,6 @@ def get_sakhi_agent_graph():
         route_pending,
         {
             "finalize": "finalize_catalog_listing",
-            "declined": "assemble_reply",
             "still_pending": "assemble_reply",
             "price_updated": "assemble_reply",
             "not_pending": "detect_intent"

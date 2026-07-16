@@ -20,13 +20,20 @@ GREETING_TEXT = {
     "reseller": "Namaste Sunita didi! Main aapki AI Sakhi hu. Bolkar ya likhkar mujhse apne catalog, orders aur returns ki baatein kijiye. 🌸",
     "customer": "Namaste! Main Sakhi hu. Aap apne order, delivery, ya return ke baare mein pooch sakte hain. 🌸"
 }
+# Devanagari versions used only for TTS - Sarvam pronounces pure Devanagari far
+# more naturally than romanized Hindi (same reasoning as the dual-output agents).
+GREETING_TTS_TEXT = {
+    "reseller": "नमस्ते सुनीता दीदी! मैं आपकी ए आई सखी हूँ। बोलकर या लिखकर मुझसे अपने कैटलॉग, ऑर्डर्स और रिटर्न्स की बातें कीजिये।",
+    "customer": "नमस्ते! मैं सखी हूँ। आप अपने ऑर्डर, डिलीवरी, या रिटर्न के बारे में पूछ सकते हैं।"
+}
 
 @router.get("/tts/greeting")
 async def tts_greeting(mode: str = Query("reseller")):
     """Pre-synthesizes the mode-specific welcome message so the UI can play a real
     Sarvam voice note on load/mode-switch instead of falling back to browser TTS."""
     text = GREETING_TEXT.get(mode, GREETING_TEXT["reseller"])
-    tts_bytes = await synthesize_speech(text)
+    tts_text = GREETING_TTS_TEXT.get(mode, GREETING_TTS_TEXT["reseller"])
+    tts_bytes = await synthesize_speech(tts_text)
     audio_b64 = base64.b64encode(tts_bytes).decode("utf-8") if tts_bytes else None
     return {"text": text, "audio": audio_b64}
 
@@ -97,6 +104,7 @@ async def chat_send(
             "reply_text": "",
             "reply_audio_b64": None,
             "reply_image_url": None,
+            "reply_tts_text": None,
             "listing_finalized": False,
             "listing_broadcast_caption": None,
             "trace_logs": [],
@@ -116,7 +124,12 @@ async def chat_send(
         reply_image_url = result.get("reply_image_url", None)
 
         # 5. Synthesize TTS Speech (Text-to-Speech)
-        tts_bytes = await synthesize_speech(reply_text)
+        # Agents emit a Devanagari "tts_text" alongside the Hinglish "ui_text"
+        # (reply_text) from the same LLM call - Sarvam pronounces pure Devanagari
+        # far more naturally than romanized Hindi. Falls back to reply_text for
+        # any node that only sets a deterministic template reply.
+        tts_input_text = result.get("reply_tts_text") or reply_text
+        tts_bytes = await synthesize_speech(tts_input_text)
         audio_b64 = None
         voice_fallback = True
 
