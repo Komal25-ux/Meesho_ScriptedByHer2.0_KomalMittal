@@ -45,28 +45,88 @@ const GREETINGS = {
   customer: 'Namaste! Main Sakhi hu. Aap apne order, delivery, ya return ke baare mein pooch sakte hain. 🌸'
 };
 
+const MIN_PANEL_PCT = 25;
+const MAX_PANEL_PCT = 75;
+
 export default function App() {
   const [activeMode, setActiveMode] = useState('reseller'); // 'reseller' or 'customer'
-  const [messages, setMessages] = useState([
+
+  // Reseller and Customer are separate people talking to Sakhi in this demo
+  // (the reseller managing her business vs. a buyer asking about an order),
+  // so their chat histories are kept in fully separate state - switching the
+  // toggle must never mix one conversation's messages into the other's.
+  const [resellerMessages, setResellerMessages] = useState([
     { role: 'assistant', text: GREETINGS.reseller, audio: null, voice_fallback: true }
   ]);
+  const [customerMessages, setCustomerMessages] = useState([
+    { role: 'assistant', text: GREETINGS.customer, audio: null, voice_fallback: true }
+  ]);
+  const currentMessages = activeMode === 'reseller' ? resellerMessages : customerMessages;
+  const setCurrentMessages = activeMode === 'reseller' ? setResellerMessages : setCustomerMessages;
+
   const [textInput, setTextInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [traceLogs, setTraceLogs] = useState([]);
   const [viewMode, setViewMode] = useState('chat'); // 'chat' or 'trace' on mobile
   const [activeTab, setActiveTab] = useState('logs'); // 'logs' or 'sales' on dashboard
+  const [leftWidthPct, setLeftWidthPct] = useState(50); // draggable chat/judge panel split
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches
+  );
 
   const chatEndRef = useRef(null);
   const wsRef = useRef(null);
+  const workspaceRef = useRef(null);
+  const isDraggingRef = useRef(false);
 
-  // Fetch a real Sarvam-synthesized greeting whenever the mode switches,
-  // so the welcome message plays real audio instead of falling back to browser TTS.
+  // Track desktop/mobile breakpoint so the drag-resize width only applies
+  // when the two panels are actually side-by-side (md: and above).
+  useEffect(() => {
+    const mql = window.matchMedia('(min-width: 768px)');
+    const handleChange = (e) => setIsDesktop(e.matches);
+    mql.addEventListener('change', handleChange);
+    return () => mql.removeEventListener('change', handleChange);
+  }, []);
+
+  // Draggable divider between the Chat and Judge panels
+  const handleDividerMouseDown = () => {
+    isDraggingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!isDraggingRef.current || !workspaceRef.current) return;
+      const rect = workspaceRef.current.getBoundingClientRect();
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      setLeftWidthPct(Math.min(MAX_PANEL_PCT, Math.max(MIN_PANEL_PCT, pct)));
+    };
+    const handleMouseUp = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  // Resets a specific mode's chat to just its welcome message and fetches
+  // real Sarvam audio for it. Used both for the explicit "reset" button and
+  // to lazily fetch audio the first time a mode is visited.
   const loadGreeting = async (mode) => {
     const greetingText = GREETINGS[mode];
-    setMessages([{ role: 'assistant', text: greetingText, audio: null, voice_fallback: true }]);
+    const setter = mode === 'reseller' ? setResellerMessages : setCustomerMessages;
+    setter([{ role: 'assistant', text: greetingText, audio: null, voice_fallback: true }]);
     try {
       const response = await axios.get(`${API_BASE_URL}/api/v1/tts/greeting`, { params: { mode } });
-      setMessages([{
+      setter([{
         role: 'assistant',
         text: greetingText,
         audio: response.data.audio,
@@ -80,7 +140,12 @@ export default function App() {
   const handleModeSwitch = (mode) => {
     if (mode === activeMode) return;
     setActiveMode(mode);
-    loadGreeting(mode);
+    // Lazily fetch real greeting audio the first time this mode is visited,
+    // without wiping any conversation that's already happened in it.
+    const targetMessages = mode === 'reseller' ? resellerMessages : customerMessages;
+    if (targetMessages.length === 1 && targetMessages[0].audio === null) {
+      loadGreeting(mode);
+    }
   };
 
   // Fetch real audio for the initial reseller greeting on first mount
@@ -92,7 +157,7 @@ export default function App() {
   // Scroll to bottom of chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [currentMessages]);
 
   // Connect to WebSocket on startup
   useEffect(() => {
@@ -147,6 +212,20 @@ export default function App() {
     });
   };
 
+  // When the reseller approves a catalog listing, broadcast the finalized
+  // promotional post into the Customer segment's chat - simulating it
+  // reaching buyers - regardless of which segment is currently on screen.
+  const broadcastListingToCustomers = (data) => {
+    if (!data.listing_finalized) return;
+    setCustomerMessages((prev) => [...prev, {
+      role: 'assistant',
+      text: `📢 Naya product aaya hai!\n\n${data.broadcast_caption || data.text}`,
+      image_url: data.image_url,
+      audio: null,
+      voice_fallback: false
+    }]);
+  };
+
   // Text message send handler
   const handleSendMessage = async () => {
     if (!textInput.trim() || isLoading) return;
@@ -155,7 +234,7 @@ export default function App() {
     setIsLoading(true);
 
     // Optimistic user bubble update
-    setMessages((prev) => [...prev, { role: 'user', text: msg }]);
+    setCurrentMessages((prev) => [...prev, { role: 'user', text: msg }]);
 
     try {
       const formData = new FormData();
@@ -166,16 +245,17 @@ export default function App() {
       const response = await axios.post(`${API_BASE_URL}/api/v1/chat/send`, formData);
       const data = response.data;
 
-      setMessages((prev) => [...prev, {
+      setCurrentMessages((prev) => [...prev, {
         role: 'assistant',
         text: data.text,
         audio: data.audio,
         image_url: data.image_url,
         voice_fallback: data.voice_fallback
       }]);
+      broadcastListingToCustomers(data);
     } catch (err) {
       console.error("Error sending text message:", err);
-      setMessages((prev) => [...prev, {
+      setCurrentMessages((prev) => [...prev, {
         role: 'assistant',
         text: "Maaf kijiyega didi, abhi server se connect nahi ho pa rahi hu. Kripya thodi der me koshish karein.",
         voice_fallback: true
@@ -191,7 +271,7 @@ export default function App() {
     setIsLoading(true);
 
     // Optimistic temporary user voice bubble
-    setMessages((prev) => [...prev, { role: 'user', text: "🎙️ Voice message sent..." }]);
+    setCurrentMessages((prev) => [...prev, { role: 'user', text: "🎙️ Voice message sent..." }]);
 
     try {
       const formData = new FormData();
@@ -203,7 +283,7 @@ export default function App() {
       const data = response.data;
 
       // Replace the placeholder voice message with actual text transcription + response
-      setMessages((prev) => {
+      setCurrentMessages((prev) => {
         const updated = [...prev];
         // Clean up last user bubble if it was voice placeholder
         if (updated[updated.length - 2]?.text === "🎙️ Voice message sent...") {
@@ -217,9 +297,10 @@ export default function App() {
           voice_fallback: data.voice_fallback
         }];
       });
+      broadcastListingToCustomers(data);
     } catch (err) {
       console.error("Error sending audio blob:", err);
-      setMessages((prev) => [...prev, {
+      setCurrentMessages((prev) => [...prev, {
         role: 'assistant',
         text: "Kripya bolein firse didi, aapki awaaz saaf nahi sunai di.",
         voice_fallback: true
@@ -235,9 +316,9 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-[100dvh] flex flex-col bg-meesho-light selection:bg-meesho-pink selection:text-meesho-white">
+    <div className="h-[100dvh] flex flex-col overflow-hidden bg-meesho-light selection:bg-meesho-pink selection:text-meesho-white">
       {/* App Header */}
-      <header className="bg-meesho-jamuni border-b border-meesho-dark text-meesho-white py-4 px-6 flex justify-between items-center shadow-md">
+      <header className="shrink-0 bg-meesho-jamuni border-b border-meesho-dark text-meesho-white py-4 px-6 flex justify-between items-center shadow-md">
         <div className="flex items-center space-x-2.5">
           <div className="bg-meesho-white p-1.5 rounded-full border border-meesho-dark">
             <span className="text-lg font-bold text-meesho-jamuni">🌸</span>
@@ -274,13 +355,14 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Workspace Layout */}
-      <main className="flex-1 max-w-[1280px] w-full mx-auto p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
-        
+      {/* Main Workspace Layout - edge-to-edge, fills remaining viewport height */}
+      <main ref={workspaceRef} className="flex-1 min-h-0 flex flex-col md:flex-row">
+
         {/* Left Pane: WhatsApp-like Mobile Chat View */}
         <section
-          className={`flex flex-col border border-meesho-dark rounded-2xl bg-meesho-white shadow-tactile overflow-hidden h-[75vh] md:h-[80vh] ${
-            viewMode === 'chat' ? 'flex' : 'hidden md:flex'
+          style={isDesktop ? { width: `${leftWidthPct}%` } : undefined}
+          className={`flex flex-col min-h-0 bg-meesho-white overflow-hidden md:border-r md:border-meesho-dark ${
+            viewMode === 'chat' ? 'flex flex-1 md:flex-none' : 'hidden md:flex'
           }`}
         >
           {/* Header */}
@@ -369,7 +451,7 @@ export default function App() {
 
           {/* Scrollable messages zone */}
           <div className="flex-1 p-4 overflow-y-auto bg-slate-50 space-y-4">
-            {messages.map((msg, index) => (
+            {currentMessages.map((msg, index) => (
               <MessageBubble key={index} message={msg} />
             ))}
             <div ref={chatEndRef} />
@@ -399,19 +481,28 @@ export default function App() {
           </div>
         </section>
 
+        {/* Draggable resizer (desktop only) */}
+        <div
+          onMouseDown={handleDividerMouseDown}
+          className="hidden md:flex w-2 shrink-0 cursor-col-resize bg-meesho-dark/10 hover:bg-meesho-jamuni/40 active:bg-meesho-jamuni/60 transition-colors items-center justify-center group"
+        >
+          <div className="w-0.5 h-10 rounded-full bg-meesho-dark/30 group-hover:bg-meesho-jamuni/70"></div>
+        </div>
+
         {/* Right Pane: Judge/Analytics View */}
         <section
-          className={`flex flex-col h-[75vh] md:h-[80vh] ${
-            viewMode === 'trace' ? 'flex' : 'hidden md:flex'
+          style={isDesktop ? { width: `${100 - leftWidthPct}%` } : undefined}
+          className={`flex flex-col min-h-0 bg-meesho-light overflow-hidden ${
+            viewMode === 'trace' ? 'flex flex-1 md:flex-none' : 'hidden md:flex'
           }`}
         >
-          {/* Tabs header */}
-          <div className="flex space-x-2 mb-3">
+          {/* Tabs header - edge-to-edge at the top of the panel */}
+          <div className="shrink-0 flex border-b border-meesho-dark">
             <button
               onClick={() => setActiveTab('logs')}
-              className={`flex-1 py-2 rounded-lg text-xs font-bold border border-meesho-dark transition ${
+              className={`flex-1 py-3 text-xs font-bold transition ${
                 activeTab === 'logs'
-                  ? 'bg-meesho-jamuni text-meesho-white shadow-tactile'
+                  ? 'bg-meesho-jamuni text-meesho-white'
                   : 'bg-meesho-white text-meesho-dark hover:bg-meesho-light'
               }`}
             >
@@ -419,9 +510,9 @@ export default function App() {
             </button>
             <button
               onClick={() => setActiveTab('sales')}
-              className={`flex-1 py-2 rounded-lg text-xs font-bold border border-meesho-dark transition ${
+              className={`flex-1 py-3 text-xs font-bold transition border-l border-meesho-dark ${
                 activeTab === 'sales'
-                  ? 'bg-meesho-jamuni text-meesho-white shadow-tactile'
+                  ? 'bg-meesho-jamuni text-meesho-white'
                   : 'bg-meesho-white text-meesho-dark hover:bg-meesho-light'
               }`}
             >
@@ -429,61 +520,66 @@ export default function App() {
             </button>
           </div>
 
-          {activeTab === 'logs' ? (
-            <div className="flex-1 min-h-0">
-              <AgentTraceLog logs={traceLogs} onClear={() => setTraceLogs([])} />
-            </div>
-          ) : (
-            <div className="flex-1 bg-meesho-white border border-meesho-dark rounded-xl p-4 shadow-tactile flex flex-col justify-between overflow-hidden">
-              <div>
-                <h3 className="text-sm font-bold text-meesho-dark mb-1 flex items-center">
-                  <TrendingUp className="w-4 h-4 text-meesho-teal mr-1.5" />
-                  Didi Sales Performance Chart (Weekly)
-                </h3>
-                <p className="text-[11px] text-gray-500 mb-4 font-mono">Real-time aggregate data synchronized with Supabase DB</p>
+          {/* Output area - the panel itself is edge-to-edge, but the log/chart
+              boxes inside keep their curved, floating card aesthetic via this
+              padded wrapper */}
+          <div className="flex-1 min-h-0 p-4">
+            {activeTab === 'logs' ? (
+              <div className="h-full">
+                <AgentTraceLog logs={traceLogs} onClear={() => setTraceLogs([])} />
               </div>
-
-              {/* Responsive Chart */}
-              <div className="w-full h-56 flex-1 min-h-0">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={CHART_DATA}>
-                    <defs>
-                      <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#9F2089" stopOpacity={0.8}/>
-                        <stop offset="95%" stopColor="#9F2089" stopOpacity={0}/>
-                      </linearGradient>
-                      <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#42BC9E" stopOpacity={0.8}/>
-                        <stop offset="95%" stopColor="#42BC9E" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <XAxis dataKey="day" stroke="#1E1E24" style={{ fontSize: '10px', fontFamily: 'monospace' }} />
-                    <YAxis stroke="#1E1E24" style={{ fontSize: '10px', fontFamily: 'monospace' }} />
-                    <Tooltip contentStyle={{ fontSize: '11px', fontFamily: 'monospace', backgroundColor: '#1E1E24', color: '#fff', border: '1px solid #000' }} />
-                    <Area type="monotone" dataKey="sales" name="Sales (₹)" stroke="#9F2089" fillOpacity={1} fill="url(#colorSales)" />
-                    <Area type="monotone" dataKey="profit" name="Profit (₹)" stroke="#42BC9E" fillOpacity={1} fill="url(#colorProfit)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Sub-info layout */}
-              <div className="mt-4 border-t border-dashed border-gray-300 pt-3 grid grid-cols-2 gap-4">
-                <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
-                  <span className="text-[10px] text-gray-500 block uppercase font-mono">Best Category</span>
-                  <span className="text-sm font-bold text-meesho-jamuni">Sarees (Haldi)</span>
+            ) : (
+              <div className="h-full bg-meesho-white border border-meesho-dark rounded-xl p-4 shadow-tactile flex flex-col justify-between overflow-hidden">
+                <div>
+                  <h3 className="text-sm font-bold text-meesho-dark mb-1 flex items-center">
+                    <TrendingUp className="w-4 h-4 text-meesho-teal mr-1.5" />
+                    Didi Sales Performance Chart (Weekly)
+                  </h3>
+                  <p className="text-[11px] text-gray-500 mb-4 font-mono">Real-time aggregate data synchronized with Supabase DB</p>
                 </div>
-                <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
-                  <span className="text-[10px] text-gray-500 block uppercase font-mono">Conversion Ratio</span>
-                  <span className="text-sm font-bold text-meesho-teal">84% Success</span>
+
+                {/* Responsive Chart */}
+                <div className="w-full h-56 flex-1 min-h-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={CHART_DATA}>
+                      <defs>
+                        <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#9F2089" stopOpacity={0.8}/>
+                          <stop offset="95%" stopColor="#9F2089" stopOpacity={0}/>
+                        </linearGradient>
+                        <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#42BC9E" stopOpacity={0.8}/>
+                          <stop offset="95%" stopColor="#42BC9E" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="day" stroke="#1E1E24" style={{ fontSize: '10px', fontFamily: 'monospace' }} />
+                      <YAxis stroke="#1E1E24" style={{ fontSize: '10px', fontFamily: 'monospace' }} />
+                      <Tooltip contentStyle={{ fontSize: '11px', fontFamily: 'monospace', backgroundColor: '#1E1E24', color: '#fff', border: '1px solid #000' }} />
+                      <Area type="monotone" dataKey="sales" name="Sales (₹)" stroke="#9F2089" fillOpacity={1} fill="url(#colorSales)" />
+                      <Area type="monotone" dataKey="profit" name="Profit (₹)" stroke="#42BC9E" fillOpacity={1} fill="url(#colorProfit)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Sub-info layout */}
+                <div className="mt-4 border-t border-dashed border-gray-300 pt-3 grid grid-cols-2 gap-4">
+                  <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
+                    <span className="text-[10px] text-gray-500 block uppercase font-mono">Best Category</span>
+                    <span className="text-sm font-bold text-meesho-jamuni">Sarees (Haldi)</span>
+                  </div>
+                  <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
+                    <span className="text-[10px] text-gray-500 block uppercase font-mono">Conversion Ratio</span>
+                    <span className="text-sm font-bold text-meesho-teal">84% Success</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </section>
       </main>
 
       {/* Footer copyright */}
-      <footer className="py-4 border-t border-meesho-dark/15 text-center text-[10px] font-mono text-gray-500 bg-meesho-white">
+      <footer className="shrink-0 py-2 border-t border-meesho-dark/15 text-center text-[10px] font-mono text-gray-500 bg-meesho-white">
         © 2026 ScriptedBy{"{Her}"} 2.0 Hackathon. Powered by Google Gemini & Supabase.
       </footer>
     </div>

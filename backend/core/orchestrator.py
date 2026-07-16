@@ -12,10 +12,19 @@ from backend.core.image_compositor import generate_ad_creative
 logger = logging.getLogger("sakhi-backend")
 
 # In-memory store for catalog listings awaiting reseller approval, keyed by
-# whatsapp_number. A single-process prototype dict is sufficient here since
-# there's no multi-worker deployment; a real deployment would persist this
-# (e.g. a Supabase table) so approval survives across server restarts/workers.
+# whatsapp_number + active_mode. A single-process prototype dict is sufficient
+# here since there's no multi-worker deployment; a real deployment would
+# persist this (e.g. a Supabase table) so approval survives across server
+# restarts/workers.
+#
+# Keying by whatsapp_number alone previously meant Reseller and Customer mode
+# shared the same pending-approval slot (both send the same whatsapp_number),
+# so a draft awaiting confirmation in Reseller mode would bleed into Customer
+# mode's chat. Namespacing the key by mode isolates them.
 PENDING_LISTINGS: Dict[str, Dict[str, Any]] = {}
+
+def _pending_key(whatsapp_number: str, active_mode: str) -> str:
+    return f"{whatsapp_number}::{active_mode}"
 
 AFFIRMATIVE_KEYWORDS = ["haan", "haa", "ha ", "yes", "kar do", "kardo", "confirm", "post kar", "theek hai", "thik hai", "ok", "okay", "sahi hai", "post karo", "chalo"]
 NEGATIVE_KEYWORDS = ["nahi", "no", "cancel", "mat karo", "ruko", "rehne do", "abhi nahi"]
@@ -44,6 +53,11 @@ class SakhiState(TypedDict):
     reply_text: str
     reply_audio_b64: Optional[str]
     reply_image_url: Optional[str]
+
+    # Set when a catalog listing was just finalized this turn, so the API
+    # layer can broadcast the post into the Customer segment's chat.
+    listing_finalized: bool
+    listing_broadcast_caption: Optional[str]
 
     # Tracking telemetry for dashboard
     trace_logs: List[Dict[str, Any]]
@@ -107,11 +121,13 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
     "kar do" and "nahi" can both appear inside a price-change message."""
     t_start = time.time()
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
+    active_mode = state.get("active_mode", "reseller")
     reseller_name = state.get("reseller_name", "Sunita Didi")
     raw_input = state.get("raw_input", "")
     user_input = raw_input.strip().lower()
 
-    pending = PENDING_LISTINGS.get(whatsapp_number)
+    pending_key = _pending_key(whatsapp_number, active_mode)
+    pending = PENDING_LISTINGS.get(pending_key)
     if not pending:
         state["pending_route"] = "not_pending"
         return state
@@ -125,7 +141,7 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
         pending["selling_price"] = new_price
         pending["listing_payload"]["selling_price_inr"] = new_price
         pending["listing_payload"]["whatsapp_caption"] = new_caption
-        PENDING_LISTINGS[whatsapp_number] = pending
+        PENDING_LISTINGS[pending_key] = pending
 
         state["reply_text"] = (
             f"Theek hai Didi, price update kar diya. *{pending['matched_product_name']}* ab "
@@ -138,7 +154,7 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
     elif any(k in user_input for k in AFFIRMATIVE_KEYWORDS):
         state["pending_route"] = "finalize"
     elif any(k in user_input for k in NEGATIVE_KEYWORDS):
-        PENDING_LISTINGS.pop(whatsapp_number, None)
+        PENDING_LISTINGS.pop(pending_key, None)
         state["reply_text"] = (
             f"Theek hai Didi, maine *{pending['matched_product_name']}* post nahi kiya. "
             f"Jab ready ho tab naya item batayein."
@@ -325,6 +341,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
     user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
+    active_mode = state.get("active_mode", "reseller")
 
     # 1. Generate text embedding using Gemini
     embedding = []
@@ -388,7 +405,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
 
         # Human-in-the-loop: hold the draft and wait for explicit reseller approval
         # before it's saved/posted (see check_pending_approval / finalize_catalog_listing).
-        PENDING_LISTINGS[whatsapp_number] = {
+        PENDING_LISTINGS[_pending_key(whatsapp_number, active_mode)] = {
             "listing_payload": listing_payload,
             "base_image_url": base_image_url,
             "matched_product_name": matched_product.get("name"),
@@ -437,7 +454,8 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
 def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     t_start = time.time()
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
-    pending = PENDING_LISTINGS.pop(whatsapp_number, None)
+    active_mode = state.get("active_mode", "reseller")
+    pending = PENDING_LISTINGS.pop(_pending_key(whatsapp_number, active_mode), None)
 
     if not pending:
         state["reply_text"] = "Maaf kijiyega Didi, mujhe pichla draft nahi mil raha. Kripya item dobara bataiye."
@@ -470,6 +488,10 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     state["reply_text"] = reply_text
     state["reply_image_url"] = final_image_url
     state["detected_intent"] = "CATALOG"
+    # Flags the API layer to broadcast this post into the Customer segment's
+    # chat, simulating the listing reaching buyers.
+    state["listing_finalized"] = True
+    state["listing_broadcast_caption"] = listing_payload["whatsapp_caption"]
 
     latency = int((time.time() - t_start) * 1000)
     log_event = {

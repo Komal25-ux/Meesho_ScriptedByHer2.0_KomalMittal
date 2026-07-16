@@ -97,6 +97,8 @@ async def chat_send(
             "reply_text": "",
             "reply_audio_b64": None,
             "reply_image_url": None,
+            "listing_finalized": False,
+            "listing_broadcast_caption": None,
             "trace_logs": [],
             "context_data": None
         }
@@ -126,7 +128,9 @@ async def chat_send(
             "text": reply_text,
             "audio": audio_b64,
             "image_url": reply_image_url,
-            "voice_fallback": voice_fallback
+            "voice_fallback": voice_fallback,
+            "listing_finalized": bool(result.get("listing_finalized")),
+            "broadcast_caption": result.get("listing_broadcast_caption")
         }
 
     except Exception as e:

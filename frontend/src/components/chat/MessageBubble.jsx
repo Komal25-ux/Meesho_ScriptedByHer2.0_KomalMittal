@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Volume2, VolumeX, Image as ImageIcon, Sparkles } from 'lucide-react';
+import { Volume2, VolumeX, Sparkles } from 'lucide-react';
 
 export default function MessageBubble({ message }) {
   const { role, text, audio, image_url, voice_fallback } = message;
@@ -67,16 +67,12 @@ export default function MessageBubble({ message }) {
         {image_url && (
           <div className="mt-3 rounded-lg overflow-hidden border border-meesho-dark bg-meesho-white">
             <img src={image_url} alt="Product Creative" className="w-full h-auto object-cover" />
-            <div className="p-2 border-t border-meesho-dark bg-meesho-light flex items-center space-x-2">
-              <ImageIcon className="w-4 h-4 text-meesho-jamuni" />
-              <span className="text-xs font-mono text-meesho-dark">SKU catalog mockup generated</span>
-            </div>
           </div>
         )}
 
         {/* Audio Player Control */}
         {(audio || voice_fallback) && !isUser && (
-          <div className="mt-3 flex items-center justify-between border-t border-dashed border-meesho-dark/30 pt-2">
+          <div className="mt-3 flex items-center border-t border-dashed border-meesho-dark/30 pt-2">
             <button
               onClick={handlePlayVoice}
               className="flex items-center space-x-2 bg-meesho-white text-meesho-jamuni hover:bg-meesho-jamuni hover:text-meesho-white border border-meesho-dark py-1 px-3 rounded-md text-xs transition duration-150 active:translate-y-[1px]"
@@ -93,9 +89,6 @@ export default function MessageBubble({ message }) {
                 </>
               )}
             </button>
-            <span className="text-[10px] font-mono text-meesho-dark/70">
-              {voice_fallback ? "Browser TTS" : "Sarvam Audio"}
-            </span>
           </div>
         )}
       </div>
