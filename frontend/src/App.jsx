@@ -471,13 +471,6 @@ export default function App() {
                 >
                   Customer Qs
                 </button>
-                <button
-                  onClick={() => triggerDemo("saree choti pad rahi hai return ya exchange karna hai")}
-                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-                  title="Pre-fills a customer complaint for you to send - Customer to Sakhi"
-                >
-                  You Ask: Exchange
-                </button>
               </>
             )}
           </div>

@@ -80,6 +80,182 @@ Output ONLY valid JSON: {{"intent": "approve" | "modify" | "new_request"}}"""
         return "new_request"
     return "new_request"
 
+# In-memory store for a return in progress awaiting the customer's next reply,
+# keyed exactly like PENDING_LISTINGS (whatsapp_number + active_mode) so it
+# never bleeds into the Reseller segment. Seeded by run_returns_proactive_outreach
+# when the backend system webhook fires (see /api/v1/system/trigger-return) -
+# this is the ONLY way a return ever starts. From there, the customer's
+# free-text replies are intercepted here turn-by-turn (the graph has no
+# persistent thread memory, so without this dict there would be no way to
+# know "this customer is mid-return" by the time their next message arrives).
+PENDING_RETURNS: Dict[str, Dict[str, Any]] = {}
+
+class ReturnGrievanceIntent(BaseModel):
+    scenario: Literal["hard_return", "size_issue", "color_style_issue", "defective"]
+
+def classify_return_grievance(user_input: str, product_name: str) -> str:
+    """Buckets the customer's first reply to a return outreach into Scenario
+    A/B/C/D of the Returns Retention Funnel. An LLM call, not keyword
+    matching, for the same reason classify_approval_intent is one: phrasing
+    here is too free-form for reliable substring checks (e.g. "chota hai"
+    alone is ambiguous between "runs small" and "got smaller/damaged")."""
+    prompt = f"""You are an intent router for a Meesho Returns Retention flow. The customer initiated a
+return for "{product_name}" and was just asked what went wrong. They replied: "{user_input}"
+
+Classify their grievance into EXACTLY ONE bucket:
+- "hard_return": they insist on returning / want a refund and refuse any exchange. E.g. "Nahi, mujhe waapis hi karna hai", "Paise waapis chahiye".
+- "size_issue": complaint about fit. E.g. "Suit chota hai", "Size tight hai", "Bada ho gaya".
+- "color_style_issue": doesn't like the look/color. E.g. "Color achha nahi lag raha", "Style pasand nahi aayi".
+- "defective": reports damage or a manufacturing defect. E.g. "Phata hua hai", "Kharab hai", "Daag laga hai".
+
+Output ONLY valid JSON: {{"scenario": "hard_return"|"size_issue"|"color_style_issue"|"defective"}}"""
+    raw_text = generate_with_fallback(prompt)
+    if raw_text:
+        try:
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            parsed = ReturnGrievanceIntent(**json.loads(cleaned))
+            return parsed.scenario
+        except (json.JSONDecodeError, ValidationError, KeyError) as e:
+            logger.warning(f"Return grievance classification failed to parse ({e}); using keyword fallback.")
+
+    # Emergency fallback only - used if Gemini is entirely unreachable.
+    lower = user_input.strip().lower()
+    if any(w in lower for w in ["phata", "kharab", "daag", "defect", "damage", "toota"]):
+        return "defective"
+    if any(w in lower for w in ["size", "chota", "bada", "tight", "loose", "fit"]):
+        return "size_issue"
+    if any(w in lower for w in ["color", "rang", "style", "pasand nahi"]):
+        return "color_style_issue"
+    return "hard_return"
+
+class ExchangeConfirmationIntent(BaseModel):
+    intent: Literal["accept", "decline"]
+
+def classify_exchange_confirmation(user_input: str) -> str:
+    """Buckets the customer's reply to an offered exchange/replacement into
+    accept (Scenario E) or decline (falls back to Scenario A - Hard Return)."""
+    prompt = f"""The customer was just offered an exchange/replacement for their return. They replied: "{user_input}"
+
+Classify into EXACTLY ONE:
+- "accept": they agree to the offered exchange/replacement (e.g. "haan thik hai", "ok bhej do", "chalega", "yes").
+- "decline": they do not want it and would rather return for a refund (e.g. "nahi", "refund hi chahiye", "wapas karna hai").
+
+Output ONLY valid JSON: {{"intent": "accept"|"decline"}}"""
+    raw_text = generate_with_fallback(prompt)
+    if raw_text:
+        try:
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            parsed = ExchangeConfirmationIntent(**json.loads(cleaned))
+            return parsed.intent
+        except (json.JSONDecodeError, ValidationError, KeyError) as e:
+            logger.warning(f"Exchange confirmation classification failed to parse ({e}); using keyword fallback.")
+
+    lower = user_input.strip().lower()
+    if any(k in lower for k in AFFIRMATIVE_KEYWORDS):
+        return "accept"
+    return "decline"
+
+def _embed_text(text: str) -> list:
+    if not configure_gemini():
+        return []
+    try:
+        embed_res = genai.embed_content(
+            model="models/gemini-embedding-001",
+            content=text,
+            task_type="retrieval_query",
+            output_dimensionality=768
+        )
+        return embed_res["embedding"]
+    except Exception as e:
+        logger.error(f"Embedding generation failed in Returns Retention flow: {e}")
+        return []
+
+def _lookup_product_by_name(product_name: str) -> Optional[Dict[str, Any]]:
+    """Anchors the Returns Retention flow to the actual item being returned by
+    semantic-matching its name against the real catalog - never guessed."""
+    matches = db_client.match_products(_embed_text(product_name), threshold=0.15, limit=1)
+    return matches[0] if matches else None
+
+def _find_alternative_product(original_product: Dict[str, Any], query_hint: str) -> Optional[Dict[str, Any]]:
+    """Scenario B/C alternative lookup: real RAG retrieval against the catalog
+    only - the model is never allowed to name a product it wasn't given.
+    query_hint biases the search toward the customer's actual complaint, and
+    the original product is excluded from its own results by product_id."""
+    matches = db_client.match_products(
+        _embed_text(f"{original_product.get('category', '')} {query_hint}"),
+        threshold=0.15,
+        limit=3
+    )
+    for m in matches:
+        if m.get("product_id") != original_product.get("product_id"):
+            return m
+    return None
+
+# ── RETURNS RETENTION FUNNEL SYSTEM PROMPT ────────────────────
+# Hardcoded behavioral matrix for the Returns Agent. CURRENT_STAGE and
+# ALTERNATIVE_PRODUCT are computed deterministically in Python (see
+# check_pending_return below) BEFORE this prompt is ever called - the model
+# never decides which scenario applies or invents a product; it only narrates
+# the one scenario Python has already selected, using only the grounding data
+# Python retrieved via real RAG lookups.
+RETURNS_RETENTION_SYSTEM_PROMPT = """
+You are 'Returns Didi', the Returns Retention specialist for Meesho reseller {reseller_name}. A
+customer has an active return in progress for "{product_name}" (Order #{order_id}). Your job is to
+retain the sale wherever genuinely possible - through an exchange - while never pressuring a customer
+who truly wants a refund.
+
+CURRENT STAGE FOR THIS TURN: {stage_label}
+CUSTOMER JUST SAID: "{user_input}"
+{alternative_context}
+
+Only follow the ONE scenario matching CURRENT STAGE above - ignore the others this turn.
+
+SCENARIO A - "Hard Return" (customer insists on returning, or no alternative could be found):
+Do not argue or upsell. Gracefully hand off the refund. Set suggests_alternative to false.
+You MUST output EXACTLY:
+ui_text: "Koi baat nahi! Humein khed hai ki product aapki ummeedon par khara nahi utra. Maine return request Sunita Didi ko forward kar di hai, wo jald hi refund process kar dengi. 🙏"
+tts_text: "कोई बात नहीं! हमें खेद है कि प्रोडक्ट आपकी उम्मीदों पर खरा नहीं उतरा. मैंने रिटर्न रिक्वेस्ट सुनीता दीदी को फॉरवर्ड कर दी है, वो जल्द ही रिफंड प्रोसेस कर देंगी."
+
+SCENARIO B - "Size Issue": ALTERNATIVE_PRODUCT above was retrieved from the real catalog for the
+customer's fit complaint. Warmly suggest it by name as the fix, state its size, and set
+suggests_alternative to true. You cannot hallucinate an alternative - only ever name the exact product
+given in ALTERNATIVE_PRODUCT above.
+
+SCENARIO C - "Color/Style Issue": ALTERNATIVE_PRODUCT above was retrieved from the real catalog for
+the customer's look/color complaint. Warmly suggest it by name as the alternative, mention its
+color/style, and set suggests_alternative to true. You cannot hallucinate an alternative - only ever
+name the exact product given in ALTERNATIVE_PRODUCT above.
+
+SCENARIO D - "Defective/Damaged Issue": Apologize immediately for the defect. Set suggests_alternative
+to false (no image yet - nothing has been confirmed).
+You MUST output EXACTLY:
+ui_text: "Oh no! Maaf kijiyega ki aapko kharab product mila. Kya main iski jagah naya piece bhej dun, ya aap refund chahenge?"
+tts_text: "ओह नो! माफ़ कीजियेगा की आपको ख़राब प्रोडक्ट मिला. क्या मैं इसकी जगह नया पीस भेज दूँ, या आप रिफंड चाहेंगे?"
+
+SCENARIO E - "Exchange Accepted" (closing the loop, customer just agreed to a prior exchange offer):
+Confirm and hand off to the human reseller. Set suggests_alternative to false (they already saw the
+image in the previous turn).
+You MUST output EXACTLY:
+ui_text: "Great! Maine aapki exchange request note kar li hai. Sunita Didi jald hi naye order ki dispatch details aapko bhej dengi. 🛍️"
+tts_text: "ग्रेट! मैंने आपकी एक्सचेंज रिक्वेस्ट नोट कर ली है. सुनीता दीदी जल्द ही नए आर्डर की डिस्पैच डिटेल्स आपको भेज देंगी."
+
+STRICT RULES:
+- You cannot hallucinate alternatives. Only ever name a product that appears in ALTERNATIVE_PRODUCT
+  above - never invent a product, size, or color you were not given.
+- You must output your response using the provided JSON schema. Keep responses strictly under 2 short
+  sentences, except where an EXACT string is mandated above - reproduce that verbatim.
+- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी".
+  Never use currency symbols like "₹" - always spell out the number followed by "रुपये".
+"""
+
 class SakhiState(TypedDict):
     reseller_id: str
     whatsapp_number: str
@@ -99,6 +275,8 @@ class SakhiState(TypedDict):
 
     # Human-in-the-loop catalog approval routing (transient, not persisted)
     pending_route: str
+    # Human-in-the-loop Returns Retention routing (transient, not persisted)
+    pending_return_route: str
 
     # Processing outputs
     reply_text: str
@@ -260,6 +438,192 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
 def route_pending(state: SakhiState) -> str:
     return state.get("pending_route", "not_pending")
 
+_RETURNS_STAGE_LABELS = {
+    "A": "SCENARIO A - Hard Return",
+    "B": "SCENARIO B - Size Issue",
+    "C": "SCENARIO C - Color/Style Issue",
+    "D": "SCENARIO D - Defective/Damaged Issue",
+    "E": "SCENARIO E - Exchange Accepted (closing the loop)",
+}
+
+# Exact mandated strings, used both as prompt instructions AND as the hard
+# fallback if every model in the fallback chain fails outright - same reasoning
+# as CUSTOMER_ZERO_HALLUCINATION_REFUSAL: a canned Python constant guarantees
+# the exact wording with zero hallucination risk regardless of LLM output.
+_RETURNS_FALLBACK_TEXT = {
+    "A": (
+        "Koi baat nahi! Humein khed hai ki product aapki ummeedon par khara nahi utra. Maine return request Sunita Didi ko forward kar di hai, wo jald hi refund process kar dengi. 🙏",
+        "कोई बात नहीं! हमें खेद है कि प्रोडक्ट आपकी उम्मीदों पर खरा नहीं उतरा. मैंने रिटर्न रिक्वेस्ट सुनीता दीदी को फॉरवर्ड कर दी है, वो जल्द ही रिफंड प्रोसेस कर देंगी.",
+    ),
+    "D": (
+        "Oh no! Maaf kijiyega ki aapko kharab product mila. Kya main iski jagah naya piece bhej dun, ya aap refund chahenge?",
+        "ओह नो! माफ़ कीजियेगा की आपको ख़राब प्रोडक्ट मिला. क्या मैं इसकी जगह नया पीस भेज दूँ, या आप रिफंड चाहेंगे?",
+    ),
+    "E": (
+        "Great! Maine aapki exchange request note kar li hai. Sunita Didi jald hi naye order ki dispatch details aapko bhej dengi. 🛍️",
+        "ग्रेट! मैंने आपकी एक्सचेंज रिक्वेस्ट नोट कर ली है. सुनीता दीदी जल्द ही नए आर्डर की डिस्पैच डिटेल्स आपको भेज देंगी.",
+    ),
+}
+
+def _format_alternative_context(pending: Dict[str, Any], stage_label: str) -> str:
+    if stage_label in ("B", "C") and pending.get("proposed_alternative"):
+        alt = pending["proposed_alternative"]
+        return (
+            f"ALTERNATIVE_PRODUCT: {alt.get('name')} | Price: {alt.get('suggested_selling_price_inr')} rupaye | "
+            f"Sizes: {', '.join(alt.get('sizes') or []) or 'Not specified'} | "
+            f"Colors: {', '.join(alt.get('colors') or []) or 'Not specified'}"
+        )
+    return "ALTERNATIVE_PRODUCT: N/A (not applicable at this stage)."
+
+# ── NODE 1.6: CHECK PENDING RETURN (Returns Retention Funnel) ─────
+def check_pending_return(state: SakhiState) -> SakhiState:
+    """If a return is in progress for this customer (seeded by
+    run_returns_proactive_outreach via the system webhook - see
+    /api/v1/system/trigger-return), intercept the turn here and run it
+    through the Returns Retention Funnel (Scenarios A-E) instead of normal
+    intent detection. Mirrors check_pending_approval's human-in-the-loop
+    pattern exactly, keyed the same way, for the same reason: there is no
+    LangGraph thread memory, so this dict is the only way to know "this
+    customer is mid-return" by the time their next message arrives."""
+    t_start = time.time()
+    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
+    active_mode = state.get("active_mode", "reseller")
+    reseller_name = state.get("reseller_name", "Sunita Didi")
+    raw_input = state.get("raw_input", "")
+
+    pending_key = _pending_key(whatsapp_number, active_mode)
+    pending = PENDING_RETURNS.get(pending_key)
+    if not pending:
+        state["pending_return_route"] = "not_pending"
+        return state
+
+    original_product = pending.get("original_product")
+    terminal = True
+    resolution = "refund_forwarded"
+    reason = "hard_return"
+
+    if pending.get("stage") == "awaiting_confirmation":
+        confirm = classify_exchange_confirmation(raw_input)
+        if confirm == "accept":
+            stage_label = "E"
+            resolution = "exchange_confirmed"
+            reason = pending.get("grievance", "exchange")
+        else:
+            stage_label = "A"
+            resolution = "refund_forwarded_after_decline"
+            reason = pending.get("grievance", "hard_return")
+    else:
+        grievance = classify_return_grievance(raw_input, pending.get("product_name", ""))
+        reason = grievance
+        if grievance == "hard_return":
+            stage_label = "A"
+        elif grievance == "size_issue":
+            alt = None
+            if original_product:
+                if len(original_product.get("sizes") or []) > 1:
+                    alt = original_product
+                else:
+                    alt = _find_alternative_product(original_product, "different size larger smaller fit")
+            if alt:
+                stage_label = "B"
+                pending["proposed_alternative"] = alt
+                pending["stage"] = "awaiting_confirmation"
+                pending["grievance"] = "size_issue"
+                terminal = False
+            else:
+                stage_label = "A"
+        elif grievance == "color_style_issue":
+            alt = None
+            if original_product:
+                if len(original_product.get("colors") or []) > 1:
+                    alt = original_product
+                else:
+                    alt = _find_alternative_product(original_product, "different color style")
+            if alt:
+                stage_label = "C"
+                pending["proposed_alternative"] = alt
+                pending["stage"] = "awaiting_confirmation"
+                pending["grievance"] = "color_style_issue"
+                terminal = False
+            else:
+                stage_label = "A"
+        else:  # defective
+            stage_label = "D"
+            pending["proposed_alternative"] = original_product
+            pending["stage"] = "awaiting_confirmation"
+            pending["grievance"] = "defective"
+            terminal = False
+
+    alternative_context = _format_alternative_context(pending, stage_label)
+    retention_prompt = RETURNS_RETENTION_SYSTEM_PROMPT.format(
+        reseller_name=reseller_name,
+        product_name=pending.get("product_name", ""),
+        order_id=pending.get("order_id", ""),
+        stage_label=_RETURNS_STAGE_LABELS[stage_label],
+        user_input=raw_input,
+        alternative_context=alternative_context,
+    )
+    result = generate_structured_with_fallback(retention_prompt, ReturnsAgentResponse)
+
+    fallback_ui, fallback_tts = _RETURNS_FALLBACK_TEXT.get(stage_label, (
+        f"Ji, humne {pending.get('product_name', 'is item')} ke liye ek alternative dhoondha hai - kya yeh chalega?",
+        f"जी, हमने {pending.get('product_name', 'इस आइटम')} के लिए एक विकल्प ढूंढा है - क्या यह चलेगा?",
+    ))
+    reply_text = (result.ui_text if result and result.ui_text else fallback_ui)
+    reply_tts_text = (result.tts_text if result and result.tts_text else fallback_tts)
+    suggests_alternative = result.suggests_alternative if result else (stage_label in ("B", "C"))
+
+    state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
+    # Whitelist condition: only ever attach the image when actively naming a
+    # specific, really-retrieved alternative (Scenario B/C) - null everywhere
+    # else (A, D's first ask, E's closing confirmation), matching the spec.
+    state["reply_image_url"] = (
+        pending["proposed_alternative"].get("base_image_url")
+        if stage_label in ("B", "C") and suggests_alternative and pending.get("proposed_alternative")
+        else None
+    )
+    state["pending_return_route"] = "handled"
+
+    if terminal:
+        PENDING_RETURNS.pop(pending_key, None)
+        db_client.save_return({
+            "reason": reason,
+            "resolution": resolution,
+            "conversation_log": {
+                "order_id": pending.get("order_id"),
+                "product_name": pending.get("product_name"),
+                "trigger_text": raw_input,
+            },
+        })
+    else:
+        PENDING_RETURNS[pending_key] = pending
+
+    latency = int((time.time() - t_start) * 1000)
+    log_event = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent": "ReturnsAgent",
+        "action": f"Returns Retention Funnel - {_RETURNS_STAGE_LABELS[stage_label]}",
+        "latency_ms": latency,
+        "data": {
+            "stage": stage_label,
+            "terminal": terminal,
+            "trigger_text": raw_input,
+        }
+    }
+    state["trace_logs"].append(log_event)
+    db_client.log_agent_event({
+        "session_id": whatsapp_number,
+        "event_type": "returns_retention",
+        "agent_name": "ReturnsAgent",
+        "latency_ms": latency,
+        "payload": log_event["data"]
+    })
+    return state
+
+def route_pending_return(state: SakhiState) -> str:
+    return state.get("pending_return_route", "not_pending")
+
 # ── NODE 2: INTENT DETECTION ──────────────────────────────────
 def detect_intent(state: SakhiState) -> SakhiState:
     t_start = time.time()
@@ -278,17 +642,17 @@ def detect_intent(state: SakhiState) -> SakhiState:
 You are the Orchestrator for Sakhi. You are talking DIRECTLY to an END CUSTOMER (buyer) of a
 Meesho reseller - not the reseller herself. Analyze the customer's input and route it to
 EXACTLY ONE of the following agents:
-1. CUSTOMER: Any product question - size, material, color, delivery, COD, return policy, availability.
-   Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?"
-2. RETURNS: Complaint about a product, or a return/exchange request.
-   Examples: "saree choti pad rahi hai, badalna hai", "mujhe ye wapas karna hai", "exchange option hai?"
-3. GENERAL: Greetings, or general chit-chat about what Sakhi can help with.
+1. CUSTOMER: Any product question - size, material, color, delivery, COD, return policy, availability,
+   AND any return/exchange/complaint request (the Customer agent has its own deflection rule for these).
+   Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?",
+   "saree choti pad rahi hai, badalna hai", "mujhe ye wapas karna hai", "exchange option hai?"
+2. GENERAL: Greetings, or general chit-chat about what Sakhi can help with.
    Examples: "hello sakhi", "aap kya kar sakti ho?", "thank you"
 
 User Input: "{user_input}"
 
 Output ONLY a valid JSON block of the format:
-{{"intent": "CUSTOMER|RETURNS|GENERAL", "confidence": 0.0-1.0, "reason": "one sentence explanation"}}
+{{"intent": "CUSTOMER|GENERAL", "confidence": 0.0-1.0, "reason": "one sentence explanation"}}
 """
             else:
                 prompt = f"""
@@ -296,19 +660,20 @@ You are the Orchestrator for Sakhi, an AI business manager for a Hindi-speaking 
 Analyze the user's input and route it to EXACTLY ONE of the following agents:
 1. CATALOG: User wants to list a product, set prices, or create a WhatsApp promotional post.
    Examples: "is saree ko list kar", "add this kurti to my listings for 599", "whatsapp post banao"
-2. CUSTOMER: User is relaying a question a buyer asked (e.g., size, material, delivery, cod, return policies).
-   Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?"
+2. CUSTOMER: User is relaying a question a buyer asked (e.g., size, material, delivery, cod, return
+   policies), AND any return/exchange/complaint the buyer raised (the Customer agent has its own
+   deflection rule for these - returns are never processed via chat).
+   Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?",
+   "customer ko return chahiye", "saree choti pad rahi hai, badalna hai", "exchange option hai?"
 3. GROWTH: User is asking for sales advice, performance metrics, weekly profits, or what to sell.
    Examples: "weekly sales dikhao", "is week kya profit hua?", "meri sales kaise badhayein?"
-4. RETURNS: User is complaining about a product, wants to return, or wants an exchange.
-   Examples: "customer ko return chahiye", "saree choti pad rahi hai, badalna hai", "exchange option hai?"
-5. GENERAL: Greetings, general chit-chat, or listing capabilities.
+4. GENERAL: Greetings, general chit-chat, or listing capabilities.
    Examples: "hello sakhi", "aap kya kar sakti ho?", "thank you"
 
 User Input: "{user_input}"
 
 Output ONLY a valid JSON block of the format:
-{{"intent": "CATALOG|CUSTOMER|GROWTH|RETURNS|GENERAL", "confidence": 0.0-1.0, "reason": "one sentence explanation"}}
+{{"intent": "CATALOG|CUSTOMER|GROWTH|GENERAL", "confidence": 0.0-1.0, "reason": "one sentence explanation"}}
 """
             raw_text = generate_with_fallback(prompt)
             if raw_text:
@@ -333,7 +698,7 @@ Output ONLY a valid JSON block of the format:
         user_lower = user_input.lower()
         if active_mode == "customer":
             if any(w in user_lower for w in ["return", "wapas", "exchange", "badalna", "choti"]):
-                intent = "RETURNS"
+                intent = "CUSTOMER"
             elif any(w in user_lower for w in ["size", "fabric", "material", "cod", "delivery", "kya ye", "hai"]):
                 intent = "CUSTOMER"
         else:
@@ -344,12 +709,21 @@ Output ONLY a valid JSON block of the format:
             elif any(w in user_lower for w in ["sales", "profit", "growth", "coaching", "weekly", "paisa"]):
                 intent = "GROWTH"
             elif any(w in user_lower for w in ["return", "wapas", "exchange", "badalna", "choti"]):
-                intent = "RETURNS"
+                intent = "CUSTOMER"
 
     # Safety clamp: a customer chatting directly should never trigger reseller-only
     # agents (Catalog listing, Growth analytics) even if the LLM misroutes.
     if active_mode == "customer" and intent in ("CATALOG", "GROWTH"):
         intent = "GENERAL"
+
+    # The Returns Agent is only reachable via the backend system webhook
+    # (/api/v1/system/trigger-return) - a customer must never be able to
+    # self-initiate a return via chat text. The prompts above no longer offer
+    # RETURNS as an option, but this is a hard backstop in case the classifier
+    # emits it anyway: reroute to the Customer Agent, which carries a
+    # deterministic Return Deflection Rule for exactly this case.
+    if intent == "RETURNS":
+        intent = "CUSTOMER"
 
     state["detected_intent"] = intent
     state["intent_confidence"] = confidence
@@ -616,11 +990,50 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
 
 CUSTOMER_ZERO_HALLUCINATION_REFUSAL = "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
 
+# RETURN DEFLECTION RULE: the Returns Agent is only reachable via the backend
+# system webhook (/api/v1/system/trigger-return), never through user-text
+# routing - a customer can never self-initiate a return via chat. Kept as an
+# exact deterministic constant (not an LLM-generated string) for the same
+# reason CUSTOMER_ZERO_HALLUCINATION_REFUSAL is: zero hallucination risk, and
+# it must fire the same way whether or not a matching product happens to turn
+# up in RAG.
+CUSTOMER_RETURN_DEFLECTION_UI = "Returns aur refunds ke liye, kripya apne Meesho app me 'My Orders' section se return initiate karein. 📦"
+CUSTOMER_RETURN_DEFLECTION_TTS = "रिटर्न्स और रिफंड्स के लिए, कृपया अपने मीशो ऐप में 'माय ऑर्डर्स' सेक्शन से रिटर्न इनिशिएट करें."
+_RETURN_DEFLECTION_KEYWORDS = ["return", "wapas", "exchange", "badalna", "refund"]
+
 # ── NODE 4: CUSTOMER AGENT (RAG BASED) ────────────────────────
 def run_customer_agent(state: SakhiState) -> SakhiState:
     t_start = time.time()
     user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
+
+    # RETURN DEFLECTION RULE (checked first, before any RAG/LLM call): if the
+    # user is asking to return/exchange an item, do NOT attempt to process it.
+    # Politely point them to the Meesho App's own return flow instead. No
+    # image is ever attached to this response.
+    user_lower = user_input.lower()
+    if any(w in user_lower for w in _RETURN_DEFLECTION_KEYWORDS):
+        state["reply_text"] = CUSTOMER_RETURN_DEFLECTION_UI
+        state["reply_tts_text"] = CUSTOMER_RETURN_DEFLECTION_TTS
+        state["reply_image_url"] = None
+
+        latency = int((time.time() - t_start) * 1000)
+        log_event = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "agent": "CustomerAgent",
+            "action": "Return Deflection (chat cannot self-initiate returns)",
+            "latency_ms": latency,
+            "data": {"trigger_text": user_input}
+        }
+        state["trace_logs"].append(log_event)
+        db_client.log_agent_event({
+            "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
+            "event_type": "return_deflection",
+            "agent_name": "CustomerAgent",
+            "latency_ms": latency,
+            "payload": log_event["data"]
+        })
+        return state
 
     # 1. Generate text embedding using Gemini
     embedding = []
@@ -785,107 +1198,6 @@ Rules:
     })
     return state
 
-# ── NODE 6: RETURNS AGENT ─────────────────────────────────────
-def run_returns_agent(state: SakhiState) -> SakhiState:
-    t_start = time.time()
-    user_input = state.get("raw_input", "")
-    reseller_name = state.get("reseller_name", "Sunita Didi")
-
-    # Identify return reasons (e.g. "choti pad rahi hai" -> size issue)
-    detected_reason = "size_issue" if "choti" in user_input or "size" in user_input else "expectation_mismatch"
-
-    # Insert return event state
-    db_client.save_return({
-        "reason": detected_reason,
-        "resolution": "exchange_offered",
-        "conversation_log": {"user_message": user_input}
-    })
-
-    # Look for a suitable alternative product to recommend as a replacement.
-    # Whitelist Condition 3 for images: only when one is actually found AND
-    # the agent explicitly names it as a recommendation (not the general offer).
-    alternative_context = "No ALTERNATIVE_PRODUCT found - do not name a specific item, keep the offer general."
-    alternative_product = None
-    embedding = []
-    if configure_gemini():
-        try:
-            embed_res = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=user_input,
-                task_type="retrieval_query",
-                output_dimensionality=768
-            )
-            embedding = embed_res['embedding']
-        except Exception as e:
-            logger.error(f"Embedding generation failed in Returns Agent: {e}")
-
-    if embedding:
-        alt_matches = db_client.match_products(embedding, threshold=0.15, limit=1)
-        if alt_matches:
-            alternative_product = alt_matches[0]
-            alternative_context = (
-                f"ALTERNATIVE_PRODUCT: {alternative_product.get('name')} | "
-                f"Price: {alternative_product.get('suggested_selling_price_inr')} rupaye | "
-                f"Sizes: {', '.join(alternative_product.get('sizes') or []) or 'Not specified'} | "
-                f"Colors: {', '.join(alternative_product.get('colors') or []) or 'Not specified'}"
-            )
-
-    returns_prompt = f"""
-You are 'Returns Didi', the dispute solver for Meesho reseller {reseller_name}.
-The buyer has complained: "{user_input}"
-We detected the issue as: {detected_reason}.
-
-{alternative_context}
-
-Task: Respond in warm conversational Hindi/Hinglish.
-Rules:
-- Sympathize with the size/fit issue.
-- Offer them a free size exchange or replacement instead of processing a direct refund.
-- Tell them: "Refund ki jagah hum aapko size change karke bhej dete hain, jisse aapko naya stock pasand aaye!"
-- WHITELIST - ALTERNATIVE SUGGESTION: Only if an ALTERNATIVE_PRODUCT is given above, you MAY additionally recommend that specific item by name as a replacement. If you do, set suggests_alternative to true. If no ALTERNATIVE_PRODUCT was given, or you choose not to name a specific item, set suggests_alternative to false and keep the offer general.
-- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी"). Keep responses strictly under 2 short sentences to ensure fast voice delivery.
-- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
-"""
-    result = generate_structured_with_fallback(returns_prompt, ReturnsAgentResponse)
-    reply_text = result.ui_text if result else ""
-    reply_tts_text = result.tts_text if result else ""
-    suggests_alternative = result.suggests_alternative if result else False
-
-    if not reply_text:
-        reply_text = "Maaf kijiyega didi customer ko size problem aayi. Hum unko product refund ke badle doosra size free exchange me bhej dete hain!"
-        reply_tts_text = "माफ़ कीजियेगा दीदी, कस्टमर को साइज़ प्रॉब्लम आयी। हम उनको प्रोडक्ट रिफंड के बदले दूसरा साइज़ फ्री एक्सचेंज में भेज देते हैं!"
-        suggests_alternative = False
-
-    state["reply_text"] = reply_text
-    state["reply_tts_text"] = reply_tts_text
-
-    # Whitelist Condition 3: only attach the image when the agent actively
-    # named a specific alternative product it actually found via RAG.
-    if suggests_alternative and alternative_product:
-        state["reply_image_url"] = alternative_product.get("base_image_url")
-
-    latency = int((time.time() - t_start) * 1000)
-    log_event = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "agent": "ReturnsAgent",
-        "action": "Exchange Offer Routing",
-        "latency_ms": latency,
-        "data": {
-            "dispute_reason": detected_reason,
-            "suggested_resolution": "exchange_offered",
-            "alternative_suggested": bool(suggests_alternative and alternative_product)
-        }
-    }
-    state["trace_logs"].append(log_event)
-    db_client.log_agent_event({
-        "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
-        "event_type": "returns_resolution",
-        "agent_name": "ReturnsAgent",
-        "latency_ms": latency,
-        "payload": log_event["data"]
-    })
-    return state
-
 # ── SYSTEM-TRIGGERED PROACTIVE RETURN OUTREACH ────────────────
 # Not a graph node - this is invoked by a backend system event (e.g. a return
 # initiated in the reseller's Meesho seller dashboard), not by a customer
@@ -893,7 +1205,23 @@ Rules:
 # Faking a synthetic user message and hoping the classifier reliably tags it
 # as RETURNS would be fragile; since the system already knows this is a
 # returns event by construction, there's nothing to classify.
-def run_returns_proactive_outreach(order_id: str, product_name: str, reseller_name: str = "Sunita Didi") -> Dict[str, Any]:
+def run_returns_proactive_outreach(
+    whatsapp_number: str, order_id: str, product_name: str, reseller_name: str = "Sunita Didi"
+) -> Dict[str, Any]:
+    # Seed the Returns Retention Funnel's pending state so the customer's next
+    # reply (whichever grievance they describe) is intercepted by
+    # check_pending_return instead of falling through to normal intent
+    # detection. Keyed the same way as PENDING_LISTINGS/PENDING_RETURNS
+    # elsewhere - this system event always targets the Customer segment.
+    pending_key = _pending_key(whatsapp_number, "customer")
+    PENDING_RETURNS[pending_key] = {
+        "order_id": order_id,
+        "product_name": product_name,
+        "reseller_name": reseller_name,
+        "original_product": _lookup_product_by_name(product_name),
+        "stage": "awaiting_grievance",
+    }
+
     outreach_prompt = f"""
 You are 'Returns Didi', reaching out PROACTIVELY on behalf of Meesho reseller {reseller_name}. The
 customer has NOT messaged you - a backend system event just notified you of this:
@@ -1021,19 +1349,36 @@ def get_sakhi_agent_graph():
 
     # Define Nodes
     builder.add_node("load_memory", load_memory)
+    builder.add_node("check_pending_return", check_pending_return)
     builder.add_node("check_pending_approval", check_pending_approval)
     builder.add_node("detect_intent", detect_intent)
     builder.add_node("catalog_agent", run_catalog_agent)
     builder.add_node("finalize_catalog_listing", finalize_catalog_listing)
     builder.add_node("customer_agent", run_customer_agent)
     builder.add_node("growth_agent", run_growth_agent)
-    builder.add_node("returns_agent", run_returns_agent)
     builder.add_node("general_handler", run_general_handler)
     builder.add_node("assemble_reply", assemble_final_reply)
 
     # Define Transitions / Edges
     builder.set_entry_point("load_memory")
-    builder.add_edge("load_memory", "check_pending_approval")
+    builder.add_edge("load_memory", "check_pending_return")
+
+    # Human-in-the-loop gate: the ONLY way a return can ever start is the
+    # backend system webhook (/api/v1/system/trigger-return ->
+    # run_returns_proactive_outreach), which seeds PENDING_RETURNS directly -
+    # a customer's own chat text can never initiate one (see detect_intent /
+    # route_decision below, which has no RETURNS branch at all). But once that
+    # webhook has fired, the customer's own free-text replies (describing
+    # their grievance, then confirming/declining an exchange) DO need to flow
+    # back through this graph turn-by-turn, which is what this gate is for.
+    builder.add_conditional_edges(
+        "check_pending_return",
+        route_pending_return,
+        {
+            "handled": "assemble_reply",
+            "not_pending": "check_pending_approval"
+        }
+    )
 
     # Human-in-the-loop gate: a turn with a pending catalog draft is intercepted
     # here (finalize/decline/re-ask) instead of running intent detection again.
@@ -1048,7 +1393,10 @@ def get_sakhi_agent_graph():
         }
     )
 
-    # Add conditional router based on classification
+    # Add conditional router based on classification. RETURNS is deliberately
+    # absent here: a customer can never *self-initiate* a return via chat text.
+    # Returns only ever start via the system webhook above; once started, the
+    # ongoing conversation is handled by check_pending_return, not this router.
     builder.add_conditional_edges(
         "detect_intent",
         route_decision,
@@ -1056,7 +1404,6 @@ def get_sakhi_agent_graph():
             "CATALOG": "catalog_agent",
             "CUSTOMER": "customer_agent",
             "GROWTH": "growth_agent",
-            "RETURNS": "returns_agent",
             "GENERAL": "general_handler"
         }
     )
@@ -1066,7 +1413,6 @@ def get_sakhi_agent_graph():
     builder.add_edge("finalize_catalog_listing", "assemble_reply")
     builder.add_edge("customer_agent", "assemble_reply")
     builder.add_edge("growth_agent", "assemble_reply")
-    builder.add_edge("returns_agent", "assemble_reply")
     builder.add_edge("general_handler", "assemble_reply")
 
     builder.add_edge("assemble_reply", END)

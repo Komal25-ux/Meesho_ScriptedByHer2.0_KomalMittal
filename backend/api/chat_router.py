@@ -102,6 +102,7 @@ async def chat_send(
             "detected_intent": "",
             "intent_confidence": 0.0,
             "pending_route": "",
+            "pending_return_route": "",
             "reply_text": "",
             "reply_audio_b64": None,
             "reply_image_url": None,
@@ -181,7 +182,9 @@ async def system_trigger_return(
     detect_intent would be a fragile way to reach a node we already know we
     want by construction."""
     try:
-        outreach = run_returns_proactive_outreach(order_id or "104", product_name or "Red Cotton Kurti")
+        outreach = run_returns_proactive_outreach(
+            whatsapp_number or "whatsapp:+919876543210", order_id or "104", product_name or "Red Cotton Kurti"
+        )
 
         db_client.save_return({
             "reason": "system_triggered_outreach",

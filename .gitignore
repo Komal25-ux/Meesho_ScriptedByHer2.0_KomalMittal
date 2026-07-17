@@ -10,4 +10,6 @@ build/
 .claude/
 handoff.md
 updates.txt
+prompt_ca.txt
+prompt.md
 ideas.text
