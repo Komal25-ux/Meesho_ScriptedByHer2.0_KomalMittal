@@ -989,51 +989,15 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     return state
 
 CUSTOMER_ZERO_HALLUCINATION_REFUSAL = "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
-
-# RETURN DEFLECTION RULE: the Returns Agent is only reachable via the backend
-# system webhook (/api/v1/system/trigger-return), never through user-text
-# routing - a customer can never self-initiate a return via chat. Kept as an
-# exact deterministic constant (not an LLM-generated string) for the same
-# reason CUSTOMER_ZERO_HALLUCINATION_REFUSAL is: zero hallucination risk, and
-# it must fire the same way whether or not a matching product happens to turn
-# up in RAG.
-CUSTOMER_RETURN_DEFLECTION_UI = "Returns aur refunds ke liye, kripya apne Meesho app me 'My Orders' section se return initiate karein. 📦"
-CUSTOMER_RETURN_DEFLECTION_TTS = "रिटर्न्स और रिफंड्स के लिए, कृपया अपने मीशो ऐप में 'माय ऑर्डर्स' सेक्शन से रिटर्न इनिशिएट करें."
-_RETURN_DEFLECTION_KEYWORDS = ["return", "wapas", "exchange", "badalna", "refund"]
+CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS = "माफ़ कीजिएगा, मेरे पास अभी इसकी डिटेल नहीं है. मैं दीदी से पूछ कर बताती हूँ."
 
 # ── NODE 4: CUSTOMER AGENT (RAG BASED) ────────────────────────
 def run_customer_agent(state: SakhiState) -> SakhiState:
     t_start = time.time()
     user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
-
-    # RETURN DEFLECTION RULE (checked first, before any RAG/LLM call): if the
-    # user is asking to return/exchange an item, do NOT attempt to process it.
-    # Politely point them to the Meesho App's own return flow instead. No
-    # image is ever attached to this response.
-    user_lower = user_input.lower()
-    if any(w in user_lower for w in _RETURN_DEFLECTION_KEYWORDS):
-        state["reply_text"] = CUSTOMER_RETURN_DEFLECTION_UI
-        state["reply_tts_text"] = CUSTOMER_RETURN_DEFLECTION_TTS
-        state["reply_image_url"] = None
-
-        latency = int((time.time() - t_start) * 1000)
-        log_event = {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "agent": "CustomerAgent",
-            "action": "Return Deflection (chat cannot self-initiate returns)",
-            "latency_ms": latency,
-            "data": {"trigger_text": user_input}
-        }
-        state["trace_logs"].append(log_event)
-        db_client.log_agent_event({
-            "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
-            "event_type": "return_deflection",
-            "agent_name": "CustomerAgent",
-            "latency_ms": latency,
-            "payload": log_event["data"]
-        })
-        return state
+    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
+    active_mode = state.get("active_mode", "reseller")
 
     # 1. Generate text embedding using Gemini
     embedding = []
@@ -1051,30 +1015,49 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
 
     # 2. Query Supabase vector similarity matching
     similar_skus = db_client.match_products(embedding, threshold=0.15, limit=2)
+    context_str = "\n".join([
+        f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
+        f"Category: {p.get('category')} | "
+        f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
+        f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
+        f"Material: {p.get('material') or 'Not specified'} | "
+        f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
+        for p in similar_skus
+    ]) if similar_skus else "No matching product found in the catalog for this query."
 
-    reply_text = ""
-    if similar_skus:
-        context_str = "\n".join([
-            f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
-            f"Category: {p.get('category')} | "
-            f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
-            f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
-            f"Material: {p.get('material') or 'Not specified'} | "
-            f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
-            for p in similar_skus
-        ])
+    # Single system prompt covering every turn - Priority 1 (Return Retention
+    # Hook) and Priority 2 (Purchase Intent Override) are checked by the model
+    # itself, in sequence, before the strict RAG rules apply. NOTE: image_url
+    # is deliberately NOT part of CustomerAgentResponse (see gemini_utils.py) -
+    # reproducing a CDN URL byte-for-byte in LLM JSON is a real fidelity risk,
+    # so this prompt tells the model to leave image handling to the system
+    # rather than asking it to output a URL it cannot reliably reproduce.
+    customer_prompt = f"""# System Persona & Core Objective
+You are 'Customer Didi', a polite and friendly AI customer support assistant representing a Hindi-speaking Meesho reseller named {reseller_name}. Your primary job is to answer buyer queries regarding product availability, sizes, colors, material, and pricing.
+You must prioritize customer retention, zero-hallucination factual grounding, and professional transaction handoffs.
 
-        customer_prompt = f"""
-You are 'Customer Didi', a customer query solver for Meesho reseller {reseller_name}.
+# Priority Routing Override Rules (Checked in Sequence)
 
-CRITICAL OVERRIDE - PURCHASE INTENT (check this FIRST, before anything else below):
-If the user expresses any desire to buy, purchase, or acquire the item - e.g. "mujhe khareedni hai", "mujhe khareedna hai", "ye pack kar do", "mujhe chahiye", "order karna hai", "price batao aur bhej do", "I want to buy this", "order place karo", "ye chahiye mujhe", "mujhe ye lena hai" - you MUST bypass the strict context rule below entirely. Do NOT reason about whether "how to purchase" is in the context - it never will be, and that is not a reason to refuse. Instead, you MUST output EXACTLY:
+## Priority 1: Return Retention Hook
+Trigger: the user asks about returning an item, getting a refund, exchanging a product, or indicates dissatisfaction with size/fit/quality (e.g. "mujhe return chahiye", "refund milega?", "saree wapas karni hai", "exchange kaise hoga?", "size chota hai").
+Action: you must immediately attempt to save the sale by asking for the specific reason for the return (Size, Color, or Defect) so we can offer an exchange.
+You MUST output EXACTLY:
+ui_text: "Oh! Maaf kijiyega ki product aapki ummeedon par khara nahi utra. Kya main jaan sakti hu ki issue kya hai? Size, color ya fitting mein koi dikkat aayi? Main turant isko exchange karwa sakti hu. 🔄"
+tts_text: "ओह! माफ़ कीजियेगा की प्रोडक्ट आपकी उम्मीदों पर खरा नहीं उतरा. क्या मैं जान सकती हूँ की इशू क्या है? साइज, कलर या फिटिंग में कोई दिक्कत आयी? मैं तुरंत इसको एक्सचेंज करवा सकती हूँ."
+answered_from_product_context: false
+return_retention_triggered: true
+
+## Priority 2: Purchase Intent Override
+Trigger: the user expresses a desire to buy, purchase, or order the product (e.g. "mujhe khareedna hai", "order book kar do", "price batao aur pack kar do", "I want to buy this", "ye chahiye mujhe").
+Action: you cannot complete financial transactions. Bypass the RAG context rules below and hand off the order to the human reseller.
+You MUST output EXACTLY:
 ui_text: "Ji zaroor! Maine aapki request note kar li hai. Sunita Didi jald hi aapse final order aur payment ke baare mein baat karengi. 🛍️"
 tts_text: "जी ज़रूर! मैंने आपकी रिक्वेस्ट नोट कर ली है. सुनीता दीदी जल्द ही आपसे फाइनल आर्डर और पेमेंट के बारे में बात करेंगी."
-answered_from_product_context: false (this is a purchase handoff, not a grounded product answer - no image is shown for order placements, per policy)
-The actual transaction is always handed off to the human reseller, never completed by the bot. This override takes priority over every rule below.
+answered_from_product_context: false
+return_retention_triggered: false
 
-Only if the purchase-intent override above does NOT apply, answer the buyer's query based ONLY on the provided context below:
+# Product Query Handling (Strict RAG Rules)
+Only if Priority 1 and Priority 2 above do NOT apply, answer based ONLY on the provided context below.
 
 CONTEXT:
 {context_str}
@@ -1082,43 +1065,59 @@ CONTEXT:
 USER QUERY:
 "{user_input}"
 
-Rules:
-- Keep it concise.
-- A product appearing in CONTEXT means it EXISTS and IS AVAILABLE - if the customer asks a general availability question ("kya blue kurti available hai?", "kya ye milegi?", "kya hai ye?"), that is answered as long as a matching product is in the context. Do not treat "availability" itself as a missing detail.
-- SUCCESS CASE: When you successfully find the product(s) the customer is asking about in the context, you MUST explicitly state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"), and set answered_from_product_context to true.
-- CRITICAL FALLBACK RULE: Only use this when the customer asks about a SPECIFIC attribute value that is genuinely absent from context - e.g. they ask for a color/size that is NOT in the product's listed colors/sizes, or a fact nowhere in the description. In that case ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" (and tts_text its natural Devanagari equivalent), and you MUST set answered_from_product_context to false. Never guess a specific value not present in context - but do not refuse general availability questions that the context already answers.
-- Do NOT make up any details or facts outside the context.
-- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी"). Keep responses strictly under 2 short sentences to ensure fast voice delivery.
-- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
+1. Factual Constraints: Do not invent attributes outside CONTEXT. A product appearing in CONTEXT means it EXISTS and IS AVAILABLE - a general availability question ("kya ye milegi?") is answered as long as a matching product is in context; do not treat availability itself as a missing detail.
+2. Success Case (Details Found): Answer warmly. You MUST state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"). Set answered_from_product_context to true and return_retention_triggered to false.
+3. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from context, do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false and return_retention_triggered to false.
+
+# Phonetic & Formatting Guidelines for TTS
+- Never use currency symbols like '₹' or 'Rs.' - always spell out the number followed by 'रुपये' (e.g. "799 रुपये").
+- Never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी".
+- tts_text must be a direct, word-for-word translation of ui_text into pure Devanagari script.
+- Keep responses strictly under 2 short sentences, except where an EXACT string is mandated above - reproduce that verbatim.
+
+# Output
+Image handling is managed entirely by the system based on your answered_from_product_context flag - do not attempt to output an image URL yourself, it is not part of your output schema.
+You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context, return_retention_triggered.
 """
-        result = generate_structured_with_fallback(customer_prompt, CustomerAgentResponse)
-        reply_text = result.ui_text if result else ""
-        reply_tts_text = result.tts_text if result else ""
-        answered_from_product_context = result.answered_from_product_context if result else False
-
-        if not reply_text:
-            reply_text = "Ji Didi, main check karke batati hu. Custom specifications ke liye hume confirmation leni hogi."
-            reply_tts_text = "जी दीदी, मैं चेक करके बताती हूँ। कस्टम स्पेसिफिकेशंस के लिए हमें कन्फर्मेशन लेनी होगी।"
-            answered_from_product_context = False
-
-        # Whitelist Condition 2: only attach the product photo when the agent
-        # actually answered a grounded product question from context. Default
-        # is no image; every other case - fallback/apology, Order Handoff,
-        # anything else - is excluded by default, not individually enumerated.
-        # Gated on the model's own explicit flag rather than an exact-string
-        # match on the reply wording, since the model doesn't always reproduce
-        # a mandated string word-for-word (e.g. an attribute-specific apology
-        # phrased slightly differently), which would let the image leak through.
-        if answered_from_product_context:
-            state["reply_image_url"] = similar_skus[0].get("base_image_url")
-    else:
-        # Default safety fallback - no context at all, so no image either.
-        reply_text = CUSTOMER_ZERO_HALLUCINATION_REFUSAL
-        reply_tts_text = "माफ़ कीजियेगा, मेरे पास अभी इसकी डिटेल नहीं है। मैं दीदी से पूछ कर बताती हूँ।"
+    result = generate_structured_with_fallback(customer_prompt, CustomerAgentResponse)
+    reply_text = result.ui_text if result and result.ui_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL
+    reply_tts_text = result.tts_text if result and result.tts_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS
+    answered_from_product_context = result.answered_from_product_context if result else False
+    return_retention_triggered = result.return_retention_triggered if result else False
 
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
-    
+
+    # Whitelist Condition 2: only attach the product photo when the agent
+    # actually answered a grounded product question from context. Default is
+    # no image; every other case - fallback/apology, Purchase Handoff, Return
+    # Retention Hook, greetings, anything else - is excluded by default, not
+    # individually enumerated. Gated on the model's own explicit flag rather
+    # than the real base_image_url ever passing through the model itself.
+    state["reply_image_url"] = (
+        similar_skus[0].get("base_image_url")
+        if answered_from_product_context and similar_skus
+        else None
+    )
+
+    # TASK 2 - Returns Handoff: if the Return Retention Hook fired this turn,
+    # seed the same PENDING_RETURNS state the system webhook uses (see
+    # check_pending_return / run_returns_proactive_outreach) so the customer's
+    # NEXT reply is intercepted by that gate and routed through the already-
+    # built Returns Retention Funnel (Scenarios A-E) instead of staying stuck
+    # in the Customer Agent loop. No new graph edges are needed for this - the
+    # graph already routes to check_pending_return on every turn before
+    # detect_intent runs; seeding this dict is what makes it fire next turn.
+    if return_retention_triggered:
+        matched_product = similar_skus[0] if similar_skus else None
+        PENDING_RETURNS[_pending_key(whatsapp_number, active_mode)] = {
+            "order_id": None,
+            "product_name": matched_product.get("name") if matched_product else "the product",
+            "reseller_name": reseller_name,
+            "original_product": matched_product,
+            "stage": "awaiting_grievance",
+        }
+
     latency = int((time.time() - t_start) * 1000)
     log_event = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1127,12 +1126,13 @@ Rules:
         "latency_ms": latency,
         "data": {
             "matched_catalog_items_count": len(similar_skus),
-            "rag_context_used": bool(similar_skus)
+            "rag_context_used": bool(similar_skus),
+            "return_retention_triggered": return_retention_triggered
         }
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
+        "session_id": whatsapp_number,
         "event_type": "customer_rag",
         "agent_name": "CustomerAgent",
         "latency_ms": latency,

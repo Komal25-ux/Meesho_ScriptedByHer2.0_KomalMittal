@@ -10,6 +10,6 @@ build/
 .claude/
 handoff.md
 updates.txt
-prompt_ca.txt
-prompt.md
+prompt_catalog_agent.txt
+prompt_customer_agent.md
 ideas.text

@@ -60,6 +60,12 @@ class CustomerAgentResponse(AgentResponse):
         "False for EVERY other case, with no exceptions: the zero-hallucination apology/fallback, "
         "the Order Handoff purchase-intent response, greetings, or anything not a grounded product answer."
     ))
+    return_retention_triggered: bool = Field(description=(
+        "True ONLY if the Priority 1 Return Retention Hook applied this turn (the customer asked about "
+        "returning, refunding, or exchanging an item, or expressed dissatisfaction with size/fit/quality). "
+        "False for every other case. This is read by the orchestrator to hand the conversation off to the "
+        "Returns Agent for the customer's next reply - it is not just a descriptive label."
+    ))
 
 class ReturnsAgentResponse(AgentResponse):
     """Returns-agent-specific dual output. Whitelist Condition 3 for images:
