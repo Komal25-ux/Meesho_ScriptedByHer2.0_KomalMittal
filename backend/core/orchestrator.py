@@ -7,7 +7,7 @@ from pydantic import BaseModel, ValidationError
 import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
-from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse
+from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse
 from backend.core.image_compositor import generate_ad_creative
 
 logger = logging.getLogger("sakhi-backend")
@@ -113,6 +113,7 @@ class SakhiState(TypedDict):
     # layer can broadcast the post into the Customer segment's chat.
     listing_finalized: bool
     listing_broadcast_caption: Optional[str]
+    listing_broadcast_caption_tts: Optional[str]
 
     # Tracking telemetry for dashboard
     trace_logs: List[Dict[str, Any]]
@@ -201,6 +202,7 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
             pending["listing_payload"]["selling_price_inr"] = new_price
             pending["listing_payload"]["whatsapp_caption"] = new_caption.ui_text
             pending["matched_product_name_tts"] = new_caption.product_name_tts
+            pending["whatsapp_caption_tts"] = new_caption.tts_text
             PENDING_LISTINGS[pending_key] = pending
 
             state["reply_text"] = (
@@ -484,6 +486,11 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "base_image_url": base_image_url,
             "matched_product_name": matched_product.get("name"),
             "matched_product_name_tts": caption_response.product_name_tts,
+            # Kept as a sibling key (not inside listing_payload, which gets
+            # persisted to Supabase and has no column for this) so the broadcast
+            # to the Customer segment can be read aloud in proper Devanagari
+            # instead of Sarvam mispronouncing the Hinglish caption.
+            "whatsapp_caption_tts": caption_response.tts_text,
             "matched_product_description": matched_product.get("description", ""),
             "selling_price": selling_price,
             "cost": cost,
@@ -521,7 +528,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "margin_profit": (selling_price - cost) if similar_skus else 0,
             "draft_created": bool(similar_skus)
         }
-    }
+    } 
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
         "session_id": whatsapp_number,
@@ -582,6 +589,7 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     # chat, simulating the listing reaching buyers.
     state["listing_finalized"] = True
     state["listing_broadcast_caption"] = listing_payload["whatsapp_caption"]
+    state["listing_broadcast_caption_tts"] = pending.get("whatsapp_caption_tts", listing_payload["whatsapp_caption"])
 
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -606,12 +614,14 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     })
     return state
 
+CUSTOMER_ZERO_HALLUCINATION_REFUSAL = "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
+
 # ── NODE 4: CUSTOMER AGENT (RAG BASED) ────────────────────────
 def run_customer_agent(state: SakhiState) -> SakhiState:
     t_start = time.time()
     user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
-    
+
     # 1. Generate text embedding using Gemini
     embedding = []
     if configure_gemini():
@@ -625,28 +635,33 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
             embedding = embed_res['embedding']
         except Exception as e:
             logger.error(f"Embedding generation failed in Customer Agent: {e}")
-            
+
     # 2. Query Supabase vector similarity matching
     similar_skus = db_client.match_products(embedding, threshold=0.15, limit=2)
-    
+
     reply_text = ""
     if similar_skus:
-        # Show the real product photo alongside the answer - buyers asking
-        # "kya ye kurti L size me hai?" expect to see the item, not just text.
-        state["reply_image_url"] = similar_skus[0].get("base_image_url")
-
         context_str = "\n".join([
-            f"Product: {p.get('name')} | Category: {p.get('category')} | "
+            f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
+            f"Category: {p.get('category')} | "
             f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
             f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
             f"Material: {p.get('material') or 'Not specified'} | "
             f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
             for p in similar_skus
         ])
-        
+
         customer_prompt = f"""
 You are 'Customer Didi', a customer query solver for Meesho reseller {reseller_name}.
-Answer the buyer's query based ONLY on the provided context below:
+
+CRITICAL OVERRIDE - PURCHASE INTENT (check this FIRST, before anything else below):
+If the user expresses any desire to buy, purchase, or acquire the item - e.g. "mujhe khareedni hai", "mujhe khareedna hai", "ye pack kar do", "mujhe chahiye", "order karna hai", "price batao aur bhej do", "I want to buy this", "order place karo", "ye chahiye mujhe", "mujhe ye lena hai" - you MUST bypass the strict context rule below entirely. Do NOT reason about whether "how to purchase" is in the context - it never will be, and that is not a reason to refuse. Instead, you MUST output EXACTLY:
+ui_text: "Ji zaroor! Maine aapki request note kar li hai. Sunita Didi jald hi aapse final order aur payment ke baare mein baat karengi. 🛍️"
+tts_text: "जी ज़रूर! मैंने आपकी रिक्वेस्ट नोट कर ली है. सुनीता दीदी जल्द ही आपसे फाइनल आर्डर और पेमेंट के बारे में बात करेंगी."
+answered_from_product_context: false (this is a purchase handoff, not a grounded product answer - no image is shown for order placements, per policy)
+The actual transaction is always handed off to the human reseller, never completed by the bot. This override takes priority over every rule below.
+
+Only if the purchase-intent override above does NOT apply, answer the buyer's query based ONLY on the provided context below:
 
 CONTEXT:
 {context_str}
@@ -656,21 +671,36 @@ USER QUERY:
 
 Rules:
 - Keep it concise.
-- If the context does not contain the answer (e.g. they ask for custom color or size not mentioned), ui_text MUST be EXACTLY: "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu." (and tts_text its natural Devanagari equivalent).
+- A product appearing in CONTEXT means it EXISTS and IS AVAILABLE - if the customer asks a general availability question ("kya blue kurti available hai?", "kya ye milegi?", "kya hai ye?"), that is answered as long as a matching product is in the context. Do not treat "availability" itself as a missing detail.
+- SUCCESS CASE: When you successfully find the product(s) the customer is asking about in the context, you MUST explicitly state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"), and set answered_from_product_context to true.
+- CRITICAL FALLBACK RULE: Only use this when the customer asks about a SPECIFIC attribute value that is genuinely absent from context - e.g. they ask for a color/size that is NOT in the product's listed colors/sizes, or a fact nowhere in the description. In that case ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" (and tts_text its natural Devanagari equivalent), and you MUST set answered_from_product_context to false. Never guess a specific value not present in context - but do not refuse general availability questions that the context already answers.
 - Do NOT make up any details or facts outside the context.
 - You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी"). Keep responses strictly under 2 short sentences to ensure fast voice delivery.
 - In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
 """
-        result = generate_structured_with_fallback(customer_prompt, AgentResponse)
+        result = generate_structured_with_fallback(customer_prompt, CustomerAgentResponse)
         reply_text = result.ui_text if result else ""
         reply_tts_text = result.tts_text if result else ""
+        answered_from_product_context = result.answered_from_product_context if result else False
 
         if not reply_text:
             reply_text = "Ji Didi, main check karke batati hu. Custom specifications ke liye hume confirmation leni hogi."
             reply_tts_text = "जी दीदी, मैं चेक करके बताती हूँ। कस्टम स्पेसिफिकेशंस के लिए हमें कन्फर्मेशन लेनी होगी।"
+            answered_from_product_context = False
+
+        # Whitelist Condition 2: only attach the product photo when the agent
+        # actually answered a grounded product question from context. Default
+        # is no image; every other case - fallback/apology, Order Handoff,
+        # anything else - is excluded by default, not individually enumerated.
+        # Gated on the model's own explicit flag rather than an exact-string
+        # match on the reply wording, since the model doesn't always reproduce
+        # a mandated string word-for-word (e.g. an attribute-specific apology
+        # phrased slightly differently), which would let the image leak through.
+        if answered_from_product_context:
+            state["reply_image_url"] = similar_skus[0].get("base_image_url")
     else:
-        # Default safety fallback
-        reply_text = "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
+        # Default safety fallback - no context at all, so no image either.
+        reply_text = CUSTOMER_ZERO_HALLUCINATION_REFUSAL
         reply_tts_text = "माफ़ कीजियेगा, मेरे पास अभी इसकी डिटेल नहीं है। मैं दीदी से पूछ कर बताती हूँ।"
 
     state["reply_text"] = reply_text
@@ -760,41 +790,80 @@ def run_returns_agent(state: SakhiState) -> SakhiState:
     t_start = time.time()
     user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
-    
+
     # Identify return reasons (e.g. "choti pad rahi hai" -> size issue)
     detected_reason = "size_issue" if "choti" in user_input or "size" in user_input else "expectation_mismatch"
-    
+
     # Insert return event state
     db_client.save_return({
         "reason": detected_reason,
         "resolution": "exchange_offered",
         "conversation_log": {"user_message": user_input}
     })
-    
+
+    # Look for a suitable alternative product to recommend as a replacement.
+    # Whitelist Condition 3 for images: only when one is actually found AND
+    # the agent explicitly names it as a recommendation (not the general offer).
+    alternative_context = "No ALTERNATIVE_PRODUCT found - do not name a specific item, keep the offer general."
+    alternative_product = None
+    embedding = []
+    if configure_gemini():
+        try:
+            embed_res = genai.embed_content(
+                model="models/gemini-embedding-001",
+                content=user_input,
+                task_type="retrieval_query",
+                output_dimensionality=768
+            )
+            embedding = embed_res['embedding']
+        except Exception as e:
+            logger.error(f"Embedding generation failed in Returns Agent: {e}")
+
+    if embedding:
+        alt_matches = db_client.match_products(embedding, threshold=0.15, limit=1)
+        if alt_matches:
+            alternative_product = alt_matches[0]
+            alternative_context = (
+                f"ALTERNATIVE_PRODUCT: {alternative_product.get('name')} | "
+                f"Price: {alternative_product.get('suggested_selling_price_inr')} rupaye | "
+                f"Sizes: {', '.join(alternative_product.get('sizes') or []) or 'Not specified'} | "
+                f"Colors: {', '.join(alternative_product.get('colors') or []) or 'Not specified'}"
+            )
+
     returns_prompt = f"""
 You are 'Returns Didi', the dispute solver for Meesho reseller {reseller_name}.
 The buyer has complained: "{user_input}"
 We detected the issue as: {detected_reason}.
+
+{alternative_context}
 
 Task: Respond in warm conversational Hindi/Hinglish.
 Rules:
 - Sympathize with the size/fit issue.
 - Offer them a free size exchange or replacement instead of processing a direct refund.
 - Tell them: "Refund ki jagah hum aapko size change karke bhej dete hain, jisse aapko naya stock pasand aaye!"
+- WHITELIST - ALTERNATIVE SUGGESTION: Only if an ALTERNATIVE_PRODUCT is given above, you MAY additionally recommend that specific item by name as a replacement. If you do, set suggests_alternative to true. If no ALTERNATIVE_PRODUCT was given, or you choose not to name a specific item, set suggests_alternative to false and keep the offer general.
 - You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी"). Keep responses strictly under 2 short sentences to ensure fast voice delivery.
 - In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
 """
-    result = generate_structured_with_fallback(returns_prompt, AgentResponse)
+    result = generate_structured_with_fallback(returns_prompt, ReturnsAgentResponse)
     reply_text = result.ui_text if result else ""
     reply_tts_text = result.tts_text if result else ""
+    suggests_alternative = result.suggests_alternative if result else False
 
     if not reply_text:
         reply_text = "Maaf kijiyega didi customer ko size problem aayi. Hum unko product refund ke badle doosra size free exchange me bhej dete hain!"
         reply_tts_text = "माफ़ कीजियेगा दीदी, कस्टमर को साइज़ प्रॉब्लम आयी। हम उनको प्रोडक्ट रिफंड के बदले दूसरा साइज़ फ्री एक्सचेंज में भेज देते हैं!"
+        suggests_alternative = False
 
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
-    
+
+    # Whitelist Condition 3: only attach the image when the agent actively
+    # named a specific alternative product it actually found via RAG.
+    if suggests_alternative and alternative_product:
+        state["reply_image_url"] = alternative_product.get("base_image_url")
+
     latency = int((time.time() - t_start) * 1000)
     log_event = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -803,7 +872,8 @@ Rules:
         "latency_ms": latency,
         "data": {
             "dispute_reason": detected_reason,
-            "suggested_resolution": "exchange_offered"
+            "suggested_resolution": "exchange_offered",
+            "alternative_suggested": bool(suggests_alternative and alternative_product)
         }
     }
     state["trace_logs"].append(log_event)
@@ -815,6 +885,45 @@ Rules:
         "payload": log_event["data"]
     })
     return state
+
+# ── SYSTEM-TRIGGERED PROACTIVE RETURN OUTREACH ────────────────
+# Not a graph node - this is invoked by a backend system event (e.g. a return
+# initiated in the reseller's Meesho seller dashboard), not by a customer
+# message, so it deliberately does NOT go through load_memory/detect_intent.
+# Faking a synthetic user message and hoping the classifier reliably tags it
+# as RETURNS would be fragile; since the system already knows this is a
+# returns event by construction, there's nothing to classify.
+def run_returns_proactive_outreach(order_id: str, product_name: str, reseller_name: str = "Sunita Didi") -> Dict[str, Any]:
+    outreach_prompt = f"""
+You are 'Returns Didi', reaching out PROACTIVELY on behalf of Meesho reseller {reseller_name}. The
+customer has NOT messaged you - a backend system event just notified you of this:
+
+SYSTEM NOTIFICATION: The customer just initiated a return for Order #{order_id} ({product_name}). You
+must immediately reach out to them to ask what the issue is (size, color, defect) and politely offer
+to help with an exchange.
+
+Rules:
+- Write the first outreach message: mention the order/product, ask what went wrong (fit, color, or defect), and offer an exchange.
+- This is the FIRST message in this conversation - you do not have enough information yet to suggest a specific alternative product. Always set suggests_alternative to false here.
+- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी").
+- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
+"""
+    result = generate_structured_with_fallback(outreach_prompt, ReturnsAgentResponse)
+    reply_text = result.ui_text if result else (
+        f"Namaste! Mujhe update mila ki aapne {product_name} return ki hai. Kya fit ya color mein koi dikkat aayi? Main ise exchange karwa sakti hu."
+    )
+    reply_tts_text = result.tts_text if result else (
+        f"नमस्ते! मुझे अपडेट मिला की आपने {product_name} रिटर्न की है। क्या फिट या कलर में कोई दिक्कत आयी? मैं इसे एक्सचेंज करवा सकती हूँ।"
+    )
+
+    # Whitelist Condition 3: no alternative product has been looked up for this
+    # first outreach message, so there is structurally nothing to attach - this
+    # holds regardless of what the model sets suggests_alternative to.
+    return {
+        "reply_text": reply_text,
+        "reply_tts_text": reply_tts_text,
+        "reply_image_url": None,
+    }
 
 # ── NODE 7: GENERAL HANDLER ───────────────────────────────────
 def run_general_handler(state: SakhiState) -> SakhiState:

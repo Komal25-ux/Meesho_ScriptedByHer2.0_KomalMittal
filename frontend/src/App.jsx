@@ -221,9 +221,41 @@ export default function App() {
       role: 'assistant',
       text: `📢 Naya product aaya hai!\n\n${data.broadcast_caption || data.text}`,
       image_url: data.image_url,
-      audio: null,
-      voice_fallback: false
+      audio: data.broadcast_audio || null,
+      voice_fallback: !data.broadcast_audio
     }]);
+  };
+
+  // Judge Dashboard "system trigger" button: simulates a backend event (e.g. a
+  // return initiated in the reseller's Meesho seller dashboard) that makes
+  // Sakhi proactively message the customer, unprompted. Distinct from the
+  // "Exchange/Returns" quick-use button in the Customer Uses bar, which
+  // demos the customer-initiated flow instead.
+  const [isTriggeringReturn, setIsTriggeringReturn] = useState(false);
+  const triggerSystemReturnEvent = async () => {
+    if (isTriggeringReturn) return;
+    setIsTriggeringReturn(true);
+    setActiveMode('customer');
+    setViewMode('chat');
+    try {
+      const formData = new FormData();
+      formData.append('whatsapp_number', 'whatsapp:+919876543210');
+      formData.append('order_id', '104');
+      formData.append('product_name', 'Red Cotton Kurti');
+      const response = await axios.post(`${API_BASE_URL}/api/v1/system/trigger-return`, formData);
+      const data = response.data;
+      setCustomerMessages((prev) => [...prev, {
+        role: 'assistant',
+        text: data.text,
+        audio: data.audio,
+        image_url: data.image_url,
+        voice_fallback: data.voice_fallback
+      }]);
+    } catch (err) {
+      console.error("Error triggering system return event:", err);
+    } finally {
+      setIsTriggeringReturn(false);
+    }
   };
 
   // Text message send handler
@@ -442,8 +474,9 @@ export default function App() {
                 <button
                   onClick={() => triggerDemo("saree choti pad rahi hai return ya exchange karna hai")}
                   className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
+                  title="Pre-fills a customer complaint for you to send - Customer to Sakhi"
                 >
-                  Exchange/Returns
+                  You Ask: Exchange
                 </button>
               </>
             )}
@@ -517,6 +550,20 @@ export default function App() {
               }`}
             >
               Weekly Growth Analytics
+            </button>
+          </div>
+
+          {/* System event trigger - simulates a backend event (e.g. a return
+              initiated in the reseller's Meesho seller dashboard) making Sakhi
+              proactively message the customer, unprompted. */}
+          <div className="shrink-0 px-4 pt-3">
+            <button
+              onClick={triggerSystemReturnEvent}
+              disabled={isTriggeringReturn}
+              title="Simulates a backend event (e.g. a return logged in the seller dashboard) - Sakhi to Customer, unprompted"
+              className="w-full bg-meesho-jamuni text-meesho-white border border-meesho-dark py-2 rounded-lg text-xs font-bold hover:bg-opacity-90 transition active:translate-y-[1px] disabled:opacity-50"
+            >
+              {isTriggeringReturn ? 'Triggering...' : '🔔 Sakhi Reaches Out: Return Alert'}
             </button>
           </div>
 

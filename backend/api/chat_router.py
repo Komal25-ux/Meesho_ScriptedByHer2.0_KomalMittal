@@ -1,11 +1,12 @@
 import os
+import time
 import shutil
 import base64
 import logging
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException
 from typing import Optional
 from backend.core.vaani_audio import convert_to_wav, transcribe_audio, synthesize_speech
-from backend.core.orchestrator import sakhi_orchestrator
+from backend.core.orchestrator import sakhi_orchestrator, run_returns_proactive_outreach
 from backend.api.ws_router import manager
 from backend.db.supabase_client import db_client
 
@@ -107,6 +108,7 @@ async def chat_send(
             "reply_tts_text": None,
             "listing_finalized": False,
             "listing_broadcast_caption": None,
+            "listing_broadcast_caption_tts": None,
             "trace_logs": [],
             "context_data": None
         }
@@ -137,17 +139,76 @@ async def chat_send(
             audio_b64 = base64.b64encode(tts_bytes).decode("utf-8")
             voice_fallback = False
 
+        # 6. If a catalog listing was just finalized, synthesize a SEPARATE
+        # voice note for the broadcast that lands in the Customer segment - it
+        # reads the promotional caption, not the reseller's own confirmation
+        # reply, so it needs its own TTS pass over listing_broadcast_caption_tts.
+        broadcast_audio_b64 = None
+        if result.get("listing_finalized"):
+            broadcast_tts_text = result.get("listing_broadcast_caption_tts") or result.get("listing_broadcast_caption")
+            if broadcast_tts_text:
+                broadcast_tts_bytes = await synthesize_speech(broadcast_tts_text)
+                if broadcast_tts_bytes:
+                    broadcast_audio_b64 = base64.b64encode(broadcast_tts_bytes).decode("utf-8")
+
         return {
             "text": reply_text,
             "audio": audio_b64,
             "image_url": reply_image_url,
             "voice_fallback": voice_fallback,
             "listing_finalized": bool(result.get("listing_finalized")),
-            "broadcast_caption": result.get("listing_broadcast_caption")
+            "broadcast_caption": result.get("listing_broadcast_caption"),
+            "broadcast_audio": broadcast_audio_b64
         }
 
     except Exception as e:
         logger.error(f"Error in chat_send: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/system/trigger-return")
+async def system_trigger_return(
+    whatsapp_number: Optional[str] = Form("whatsapp:+919876543210"),
+    order_id: Optional[str] = Form("104"),
+    product_name: Optional[str] = Form("Red Cotton Kurti")
+):
+    """Simulates a backend system event - e.g. a return initiated in the
+    reseller's Meesho seller dashboard - that should make Sakhi proactively
+    reach out to the customer, without the customer having sent anything
+    first. Deliberately bypasses the LangGraph intent-detection graph: there is
+    no LangGraph thread/session memory in this app for a system event to be
+    "injected" into (every /chat/send call invokes the graph fresh with no
+    persisted history), and faking a synthetic user message to route through
+    detect_intent would be a fragile way to reach a node we already know we
+    want by construction."""
+    try:
+        outreach = run_returns_proactive_outreach(order_id or "104", product_name or "Red Cotton Kurti")
+
+        db_client.save_return({
+            "reason": "system_triggered_outreach",
+            "resolution": "awaiting_customer_response",
+            "conversation_log": {"order_id": order_id, "product_name": product_name}
+        })
+
+        trace_log = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "agent": "ReturnsAgent",
+            "action": "Proactive Return Outreach (System Triggered)",
+            "latency_ms": 0,
+            "data": {"order_id": order_id, "product_name": product_name}
+        }
+        await manager.broadcast(trace_log)
+
+        tts_bytes = await synthesize_speech(outreach["reply_tts_text"])
+        audio_b64 = base64.b64encode(tts_bytes).decode("utf-8") if tts_bytes else None
+
+        return {
+            "text": outreach["reply_text"],
+            "audio": audio_b64,
+            "image_url": outreach["reply_image_url"],
+            "voice_fallback": not bool(audio_b64)
+        }
+    except Exception as e:
+        logger.error(f"Error in system_trigger_return: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/chat/history")

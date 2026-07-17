@@ -10,7 +10,20 @@ class AgentResponse(BaseModel):
     """Dual-output schema: one Gemini call produces both the Hinglish text
     shown in the chat UI and a pure Devanagari translation for Sarvam TTS,
     instead of a second translation call or feeding Sarvam romanized Hindi
-    (which it reads back stilted/mispronounced)."""
+    (which it reads back stilted/mispronounced).
+
+    IMAGE POLICY (default-null / whitelist): note that no schema in this file
+    has an `image_url` field, and that's deliberate, not an oversight. Asking
+    an LLM to reproduce a ~70-character CDN URL byte-for-byte in JSON is a real
+    fidelity risk (truncation, "helpful" reformatting) - worse than the bug it
+    would be trying to prevent. Every image_url shown to a user is therefore
+    Python-controlled and defaults to None; it is only explicitly set by
+    orchestrator.py inside one of the whitelisted moments (see each agent's
+    node for its specific condition), never emitted by the model itself. Where
+    an agent's *reasoning* affects whether an image should show (e.g. did it
+    actually answer from context, or is this an apology), that agent gets its
+    own boolean flag below - the flag is whitelist-framed (default false,
+    explicitly true only for the allowed case) rather than the reverse."""
     ui_text: str = Field(description="The conversational response written in Hinglish (Hindi via English alphabet).")
     tts_text: str = Field(description=(
         "The exact same response translated into pure Hindi Devanagari script for the TTS engine. "
@@ -31,6 +44,33 @@ class CatalogCaptionResponse(AgentResponse):
         "The exact product name transliterated phonetically into Devanagari script, preserving "
         "how it sounds in English - NOT a meaning-based translation. E.g. 'Blue Cotton Kurti' -> "
         "'ब्लू कॉटन कुर्ती', not a translated equivalent like 'नीली सूती कुर्ती'."
+    ))
+
+class CustomerAgentResponse(AgentResponse):
+    """Customer-agent-specific dual output. Whitelist Condition 2 for images:
+    ONLY when the customer explicitly asks about a product and the agent
+    successfully retrieves and answers from matching RAG context. Everything
+    else - apology/fallback, Order Handoff purchase confirmations, greetings,
+    tangents - must NOT show an image. Framed as a positive (default-false)
+    flag rather than a fallback-only flag, so every non-whitelisted case is
+    excluded by default instead of having to be individually enumerated."""
+    answered_from_product_context: bool = Field(description=(
+        "True ONLY if you successfully answered the customer's specific product question using the "
+        "retrieved context (e.g. confirmed availability, stated price/size/color from context). "
+        "False for EVERY other case, with no exceptions: the zero-hallucination apology/fallback, "
+        "the Order Handoff purchase-intent response, greetings, or anything not a grounded product answer."
+    ))
+
+class ReturnsAgentResponse(AgentResponse):
+    """Returns-agent-specific dual output. Whitelist Condition 3 for images:
+    ONLY when the agent is actively naming and recommending one specific
+    alternative product from the catalog to replace the returned/problematic
+    item. The general "we'll offer a free exchange" response, with no specific
+    item named, must NOT show an image."""
+    suggests_alternative: bool = Field(description=(
+        "True ONLY if an ALTERNATIVE_PRODUCT was provided in the prompt context AND you are actively "
+        "naming and recommending that specific product in ui_text as a replacement. False for the "
+        "general exchange/refund offer where no specific alternative product is named."
     ))
 
 T = TypeVar("T", bound=BaseModel)
