@@ -1,86 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import confetti from 'canvas-confetti';
-import { 
-  Send, 
-  MessageSquare, 
-  User, 
-  Layers, 
-  TrendingUp, 
-  RefreshCcw, 
+import {
+  MessageSquare,
+  User,
+  Layers,
+  RefreshCcw,
   HelpCircle,
   HelpCircle as QuestionIcon,
   ChevronRight,
   TrendingDown
 } from 'lucide-react';
 import MessageBubble from './components/chat/MessageBubble';
-import VoiceRecorder from './components/chat/VoiceRecorder';
+import ChatInputBar from './components/chat/ChatInputBar';
 import NotificationBell from './components/chat/NotificationBell';
 import TerminalTraceLog from './components/dashboard/TerminalTraceLog';
-import { mockSalesData } from './data/mockSalesData';
-
-import {
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip
-} from 'recharts';
+import CatalogDashboard from './components/dashboard/CatalogDashboard';
+import GrowthDashboard from './components/dashboard/GrowthDashboard';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws');
-
-// Derives the sales chart's weekly {day, sales, profit} buckets straight from
-// mockSalesData's real transaction history (May-June), instead of a
-// hand-typed 7-day mock array - this is genuinely a 2-month dataset, so
-// weekly buckets (matching the panel's "Weekly Growth Analytics" label) fit
-// far better than a fixed Mon-Sun week.
-function buildWeeklyChartData(transactions) {
-  if (transactions.length === 0) return [];
-  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
-  const firstDate = new Date(`${sorted[0].date}T00:00:00`);
-
-  const buckets = new Map(); // weekIndex -> { sales, profit, weekStart }
-  for (const txn of sorted) {
-    const txnDate = new Date(`${txn.date}T00:00:00`);
-    const daysSinceStart = Math.round((txnDate - firstDate) / 86400000);
-    const weekIndex = Math.floor(daysSinceStart / 7);
-    if (!buckets.has(weekIndex)) {
-      const weekStart = new Date(firstDate);
-      weekStart.setDate(weekStart.getDate() + weekIndex * 7);
-      buckets.set(weekIndex, { sales: 0, profit: 0, weekStart });
-    }
-    const bucket = buckets.get(weekIndex);
-    bucket.sales += txn.revenue;
-    bucket.profit += txn.profit;
-  }
-
-  return [...buckets.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([, { sales, profit, weekStart }]) => ({
-      day: weekStart.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
-      sales,
-      profit
-    }));
-}
-
-// Best-selling category by total revenue, computed from the same dataset -
-// replaces what used to be a hardcoded "Sarees (Haldi)" label that had no
-// relationship to any actual data.
-function computeBestCategory(transactions) {
-  const totals = {};
-  for (const txn of transactions) {
-    totals[txn.category] = (totals[txn.category] || 0) + txn.revenue;
-  }
-  const [best] = Object.entries(totals).sort(([, a], [, b]) => b - a);
-  if (!best) return 'N/A';
-  const [category] = best;
-  return category.charAt(0).toUpperCase() + category.slice(1);
-}
-
-const CHART_DATA = buildWeeklyChartData(mockSalesData);
-const BEST_CATEGORY = computeBestCategory(mockSalesData);
 
 const GREETINGS = {
   reseller: 'Namaste Sunita didi! Main aapki AI Sakhi hu. Bolkar ya likhkar mujhse apne catalog, orders aur returns ki baatein kijiye. 🌸',
@@ -122,7 +61,7 @@ export default function App() {
     setIsNotifOpen(false);
   };
   const [viewMode, setViewMode] = useState('chat'); // 'chat' or 'trace' on mobile
-  const [activeTab, setActiveTab] = useState('logs'); // 'logs' or 'sales' on dashboard
+  const [activeTab, setActiveTab] = useState('logs'); // 'logs', 'sales', or 'catalog' on dashboard
   const [leftWidthPct, setLeftWidthPct] = useState(50); // draggable chat/judge panel split
   const [isDesktop, setIsDesktop] = useState(
     () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches
@@ -563,6 +502,23 @@ export default function App() {
                 >
                   Growth Agent
                 </button>
+
+                {/* Cross-segment navigation: switches the right dashboard
+                    panel's active tab without sending a chat message. */}
+                <div className="flex items-center space-x-2 ml-auto">
+                  <button
+                    onClick={() => { setActiveTab('sales'); setViewMode('trace'); }}
+                    className="border-[1.5px] border-gray-300 text-[#1E1E24] hover:bg-[#F7F7FA] rounded-[0.5rem] px-3 py-1.5 text-xs font-['Roboto_Slab',_serif] font-medium whitespace-nowrap transition"
+                  >
+                    📊 View Growth
+                  </button>
+                  <button
+                    onClick={() => { setActiveTab('catalog'); setViewMode('trace'); }}
+                    className="border-[1.5px] border-gray-300 text-[#1E1E24] hover:bg-[#F7F7FA] rounded-[0.5rem] px-3 py-1.5 text-xs font-['Roboto_Slab',_serif] font-medium whitespace-nowrap transition"
+                  >
+                    📦 Reseller's Catalog
+                  </button>
+                </div>
               </>
             ) : (
               <>
@@ -584,28 +540,14 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
 
-          {/* Audio hold-to-talk button */}
-          <VoiceRecorder onSendAudio={handleSendAudio} isLoading={isLoading} />
-
-          {/* Direct Text Input Fallback */}
-          <div className="p-3 border-t border-meesho-dark bg-meesho-light flex space-x-2">
-            <input
-              type="text"
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-              placeholder="Type message here (English or Hindi)..."
-              disabled={isLoading}
-              className="flex-1 rounded-lg border border-meesho-dark bg-meesho-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-meesho-jamuni placeholder:text-gray-400"
-            />
-            <button
-              onClick={() => handleSendMessage()}
-              disabled={isLoading || !textInput.trim()}
-              className="bg-meesho-jamuni text-meesho-white border border-meesho-dark p-2.5 rounded-lg transition active:translate-y-[1px] hover:bg-opacity-90 disabled:opacity-50"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </div>
+          {/* WhatsApp-style unified input: single mic/send action button */}
+          <ChatInputBar
+            textInput={textInput}
+            setTextInput={setTextInput}
+            onSendMessage={() => handleSendMessage()}
+            onSendAudio={handleSendAudio}
+            isLoading={isLoading}
+          />
         </section>
 
         {/* Draggable resizer (desktop only) */}
@@ -623,7 +565,22 @@ export default function App() {
             viewMode === 'trace' ? 'flex flex-1 md:flex-none' : 'hidden md:flex'
           }`}
         >
-          {/* Tabs header - edge-to-edge at the top of the panel */}
+          {/* System event trigger - simulates a backend event (e.g. a return
+              initiated in the reseller's Meesho seller dashboard) making Sakhi
+              proactively message the customer, unprompted. Top-most element
+              in this panel, ahead of the tab navigation below it. */}
+          <div className="shrink-0 px-4 pt-3 mb-4">
+            <button
+              onClick={triggerSystemReturnEvent}
+              disabled={isTriggeringReturn}
+              title="Simulates a backend event (e.g. a return logged in the seller dashboard) - Sakhi to Customer, unprompted"
+              className="w-full bg-meesho-jamuni text-meesho-white border border-meesho-dark py-2 rounded-lg text-xs font-bold hover:bg-opacity-90 transition active:translate-y-[1px] disabled:opacity-50"
+            >
+              {isTriggeringReturn ? 'Triggering...' : '🔔 Sakhi Reaches Out: Return Alert'}
+            </button>
+          </div>
+
+          {/* Tabs header - edge-to-edge, directly below the return-alert button */}
           <div className="shrink-0 flex border-b border-meesho-dark">
             <button
               onClick={() => setActiveTab('logs')}
@@ -633,7 +590,7 @@ export default function App() {
                   : 'bg-meesho-white text-meesho-dark hover:bg-meesho-light'
               }`}
             >
-              LangGraph State Logs
+              Orchestrator’s Brain 🧠
             </button>
             <button
               onClick={() => setActiveTab('sales')}
@@ -643,21 +600,17 @@ export default function App() {
                   : 'bg-meesho-white text-meesho-dark hover:bg-meesho-light'
               }`}
             >
-              Weekly Growth Analytics
+              Growth Analysis
             </button>
-          </div>
-
-          {/* System event trigger - simulates a backend event (e.g. a return
-              initiated in the reseller's Meesho seller dashboard) making Sakhi
-              proactively message the customer, unprompted. */}
-          <div className="shrink-0 px-4 pt-3">
             <button
-              onClick={triggerSystemReturnEvent}
-              disabled={isTriggeringReturn}
-              title="Simulates a backend event (e.g. a return logged in the seller dashboard) - Sakhi to Customer, unprompted"
-              className="w-full bg-meesho-jamuni text-meesho-white border border-meesho-dark py-2 rounded-lg text-xs font-bold hover:bg-opacity-90 transition active:translate-y-[1px] disabled:opacity-50"
+              onClick={() => setActiveTab('catalog')}
+              className={`flex-1 py-3 text-xs font-bold transition border-l border-meesho-dark ${
+                activeTab === 'catalog'
+                  ? 'bg-meesho-jamuni text-meesho-white'
+                  : 'bg-meesho-white text-meesho-dark hover:bg-meesho-light'
+              }`}
             >
-              {isTriggeringReturn ? 'Triggering...' : '🔔 Sakhi Reaches Out: Return Alert'}
+              Reseller's Catalog
             </button>
           </div>
 
@@ -669,51 +622,10 @@ export default function App() {
               <div className="h-full">
                 <TerminalTraceLog logs={traceLogs} onClear={() => setTraceLogs([])} />
               </div>
+            ) : activeTab === 'catalog' ? (
+              <CatalogDashboard />
             ) : (
-              <div className="h-full bg-meesho-white border border-meesho-dark rounded-xl p-4 shadow-tactile flex flex-col justify-between overflow-hidden">
-                <div>
-                  <h3 className="text-sm font-bold text-meesho-dark mb-1 flex items-center">
-                    <TrendingUp className="w-4 h-4 text-meesho-teal mr-1.5" />
-                    Didi Sales Performance Chart (Weekly)
-                  </h3>
-                  <p className="text-[11px] text-gray-500 mb-4 font-mono">May-June sales history, aggregated by week (demo data)</p>
-                </div>
-
-                {/* Responsive Chart */}
-                <div className="w-full h-56 flex-1 min-h-0">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={CHART_DATA}>
-                      <defs>
-                        <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#9F2089" stopOpacity={0.8}/>
-                          <stop offset="95%" stopColor="#9F2089" stopOpacity={0}/>
-                        </linearGradient>
-                        <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#42BC9E" stopOpacity={0.8}/>
-                          <stop offset="95%" stopColor="#42BC9E" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <XAxis dataKey="day" stroke="#1E1E24" style={{ fontSize: '10px', fontFamily: 'monospace' }} />
-                      <YAxis stroke="#1E1E24" style={{ fontSize: '10px', fontFamily: 'monospace' }} />
-                      <Tooltip contentStyle={{ fontSize: '11px', fontFamily: 'monospace', backgroundColor: '#1E1E24', color: '#fff', border: '1px solid #000' }} />
-                      <Area type="monotone" dataKey="sales" name="Sales (₹)" stroke="#9F2089" fillOpacity={1} fill="url(#colorSales)" />
-                      <Area type="monotone" dataKey="profit" name="Profit (₹)" stroke="#42BC9E" fillOpacity={1} fill="url(#colorProfit)" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-
-                {/* Sub-info layout */}
-                <div className="mt-4 border-t border-dashed border-gray-300 pt-3 grid grid-cols-2 gap-4">
-                  <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
-                    <span className="text-[10px] text-gray-500 block uppercase font-mono">Best Category</span>
-                    <span className="text-sm font-bold text-meesho-jamuni">{BEST_CATEGORY}</span>
-                  </div>
-                  <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
-                    <span className="text-[10px] text-gray-500 block uppercase font-mono">Conversion Ratio</span>
-                    <span className="text-sm font-bold text-meesho-teal">84% Success</span>
-                  </div>
-                </div>
-              </div>
+              <GrowthDashboard />
             )}
           </div>
         </section>
