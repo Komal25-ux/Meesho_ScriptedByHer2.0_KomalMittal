@@ -47,6 +47,26 @@ PENDING_SELECTIONS: Dict[str, Dict[str, Any]] = {}
 # turn's own search can't provide one.
 LAST_VIEWED_PRODUCT: Dict[str, Dict[str, Any]] = {}
 
+# The real catalog categories (see scripts/seed_catalog.py's build_catalog) -
+# the only values category-strict retrieval is ever allowed to filter by.
+# Whitelisted rather than trusting the LLM's raw string output, so a
+# hallucinated/mistyped category (or one that doesn't exist, e.g.
+# "jewellery") can never silently filter every candidate out and falsely
+# trigger the exhaustion message.
+REAL_CATEGORIES = ["sarees", "kurtis", "suits", "tops", "lehengas", "dresses"]
+
+# Product IDs already shown to this session in the CURRENT category-scoped
+# browse (see run_customer_agent / run_catalog_agent's category-strict
+# pagination) - what "show more" excludes so a repeat request never repeats
+# an item. Keyed like the dicts above; cleared whenever the session's active
+# category actually changes (see LAST_REQUESTED_CATEGORY).
+SHOWN_PRODUCT_IDS: Dict[str, list] = {}
+
+# The category this session is currently browsing, if any - lets a bare
+# follow-up like "aur dikhao" ("show more") stay scoped to the same category
+# without the customer having to repeat it every turn.
+LAST_REQUESTED_CATEGORY: Dict[str, str] = {}
+
 def _pending_key(whatsapp_number: str, active_mode: str) -> str:
     return f"{whatsapp_number}::{active_mode}"
 
@@ -185,6 +205,95 @@ Output ONLY valid JSON: {{"intent": "accept"|"decline"}}"""
     if any(k in lower for k in AFFIRMATIVE_KEYWORDS):
         return "accept"
     return "decline"
+
+class CategoryIntent(BaseModel):
+    category: Literal["sarees", "kurtis", "suits", "tops", "lehengas", "dresses", "same", "none"]
+
+# Keyword fallback for extract_category_intent - only used if Gemini is
+# unreachable, same reasoning as every other classifier's keyword fallback
+# in this file.
+_CATEGORY_KEYWORDS = {
+    "sarees": ["saree", "sari"],
+    "kurtis": ["kurti", "kurta"],
+    "suits": ["suit"],
+    "tops": ["top"],
+    "lehengas": ["lehenga", "lehnga"],
+    "dresses": ["dress"],
+}
+_MORE_KEYWORDS = ["aur", "kuch aur", "more", "another", "next", "baaki", "dikhao"]
+# If any of these fire alongside a category word, the message is NOT a
+# browse request (it's a return/purchase/specific-item message that merely
+# mentions a category in passing) - see extract_category_intent's docstring.
+_NON_BROWSE_KEYWORDS = [
+    "wapas", "return", "exchange", "badalna", "refund", "kharab", "defect",
+    "order", "khareed", "pack kar", "confirm", "book", "lelo", "le lo", "isse", "isko", "iska"
+]
+
+def extract_category_intent(user_input: str, last_category: Optional[str]) -> Optional[str]:
+    """Determines which real product category (if any) this message is a
+    genuine BROWSE request for - the signal category-strict retrieval uses
+    to narrow db_client.match_products (see run_customer_agent/
+    run_catalog_agent), NOT a general "did this category get mentioned"
+    detector, and NOT itself a routing decision.
+
+    This distinction is load-bearing, not cosmetic: a message like "saree
+    wapas karni hai" (a return) also names a category, but "saree" there is
+    incidental - the message isn't a request to browse sarees. Extracting a
+    category for it anyway was tried first and caused a real regression: the
+    aggressive category-scoped fetch (threshold=0, up to 100 candidates - see
+    match_products) filled CONTEXT with 4 unrelated sarees, and that
+    unexpectedly-populated CONTEXT was enough to distract the main LLM call
+    away from correctly firing Priority 1 (Return Retention Hook) in favor of
+    treating it as a browse. So this only ever returns a category when
+    browsing/seeing products is the message's actual primary intent.
+
+    Returns one of REAL_CATEGORIES, None (no genuine browse-category intent -
+    a fully generic query, or the message is about something else entirely
+    even if it happens to name a category), or the caller's own
+    `last_category` echoed back for a bare continuation request like "aur
+    dikhao" with no new category named.
+    """
+    prompt = f"""You are extracting a product CATEGORY BROWSE request from a Hindi/Hinglish message - nothing else.
+
+Real categories (ONLY these are valid): sarees, kurtis, suits, tops, lehengas, dresses.
+This session's currently active category (if any): {last_category or "none"}.
+
+Message: "{user_input}"
+
+Classify into EXACTLY ONE:
+- One of the 6 category names above, ONLY if the message's PRIMARY intent is to browse/see products in that category (e.g. "saree dikhao", "kurti chahiye", "suits available hai kya", "mujhe achi si saree chahiye"). A category word appearing in the message is NOT enough by itself.
+- "same": the message is a continuation asking for more of what was already being browsed, with no new category named (e.g. "aur dikhao", "kuch aur options", "more please", "aur kya hai").
+- "none": EITHER the message doesn't reference any product category at all, OR it names a category but its primary intent is something else entirely - a return/refund/exchange/complaint (e.g. "saree wapas karni hai"), a purchase confirmation (e.g. "isse order kardo"), or a question about one already-identified specific item. Those are NOT browse requests even though they may mention a category - output "none" for all of them.
+
+Output ONLY valid JSON: {{"category": "sarees"|"kurtis"|"suits"|"tops"|"lehengas"|"dresses"|"same"|"none"}}"""
+    raw_text = generate_with_fallback(prompt)
+    if raw_text:
+        try:
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            parsed = CategoryIntent(**json.loads(cleaned))
+            if parsed.category == "none":
+                return None
+            if parsed.category == "same":
+                return last_category
+            return parsed.category
+        except (json.JSONDecodeError, ValidationError, KeyError) as e:
+            logger.warning(f"Category intent extraction failed to parse ({e}); using keyword fallback.")
+
+    lower = user_input.strip().lower()
+    if any(kw in lower for kw in _NON_BROWSE_KEYWORDS):
+        # Return/purchase/specific-item signal present - never a browse
+        # request regardless of any category word also present.
+        return None
+    for cat, keywords in _CATEGORY_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return cat
+    if last_category and any(kw in lower for kw in _MORE_KEYWORDS):
+        return last_category
+    return None
 
 def _embed_text(text: str) -> list:
     if not configure_gemini():
@@ -754,10 +863,12 @@ EXACTLY ONE of the following agents:
    AND any return/exchange/complaint request (the Customer agent has its own deflection rule for these),
    AND any purchase/order confirmation, even a short one with no product details in it (the Customer
    agent has its own logic for handling this - your job here is only to route it there, not to judge
-   whether it's specific enough).
+   whether it's specific enough), AND any request to browse/see more products, even a bare continuation
+   with no product/category named (the Customer agent has its own pagination logic for this too).
    Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?",
    "saree choti pad rahi hai, badalna hai", "mujhe ye wapas karna hai", "exchange option hai?",
-   "isse order krdo", "ye lelo bas", "pack kar do", "confirm kardo", "haan yehi chahiye", "book it"
+   "isse order krdo", "ye lelo bas", "pack kar do", "confirm kardo", "haan yehi chahiye", "book it",
+   "aur dikhao", "kuch aur options", "more dikhao", "aur kya hai", "baaki options bhi dikhao"
 2. GENERAL: Greetings, or general chit-chat about what Sakhi can help with. Do NOT use this bucket just
    because a message is short or vague - a short purchase confirmation (see CUSTOMER examples above) is
    never GENERAL.
@@ -816,6 +927,8 @@ Output ONLY a valid JSON block of the format:
             elif any(w in user_lower for w in ["size", "fabric", "material", "cod", "delivery", "kya ye", "hai"]):
                 intent = "CUSTOMER"
             elif any(w in user_lower for w in ["order", "khareed", "pack", "confirm", "book", "lelo", "le lo", "chahiye"]):
+                intent = "CUSTOMER"
+            elif any(w in user_lower for w in ["dikhao", "aur", "more", "options", "baaki"]):
                 intent = "CUSTOMER"
         else:
             if any(w in user_lower for w in ["list", "add", "daal", "saree ko list", "post"]):
@@ -935,6 +1048,8 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
 
+    session_key = _pending_key(whatsapp_number, active_mode)
+
     # Exact-name lookup first - this is how a reseller's tap on a ProductGrid
     # option (see check_pending_selection / ProductGrid.jsx) arrives back
     # here: the frontend sends the option's exact product name as the next
@@ -943,9 +1058,21 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
     # similarly-named SKUs again and show the picker forever.
     exact_match = db_client.get_product_by_name(user_input)
 
+    category_filter = None
     if exact_match:
         similar_skus = [exact_match]
     else:
+        # Category-strict pagination - see extract_category_intent's
+        # docstring and run_customer_agent's identical use of it.
+        category_intent = extract_category_intent(user_input, LAST_REQUESTED_CATEGORY.get(session_key))
+        if category_intent in REAL_CATEGORIES:
+            category_filter = category_intent
+            if category_filter != LAST_REQUESTED_CATEGORY.get(session_key):
+                SHOWN_PRODUCT_IDS[session_key] = []
+            LAST_REQUESTED_CATEGORY[session_key] = category_filter
+
+        exclude_ids = SHOWN_PRODUCT_IDS.get(session_key, []) if category_filter else []
+
         # 1. Generate text embedding using Gemini
         embedding = []
         if configure_gemini():
@@ -963,10 +1090,44 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
 
         # 2. Query Supabase vector similarity - up to 4 candidates, since an
         # ambiguous match now shows a picker instead of silently auto-drafting
-        # whichever the search ranked first.
-        similar_skus = db_client.match_products(embedding, threshold=0.2, limit=4)
+        # whichever the search ranked first. Strictly within category_filter
+        # and excluding whatever's already been shown in it, if applicable.
+        similar_skus = db_client.match_products(
+            embedding, threshold=0.2, limit=4,
+            category_filter=category_filter, exclude_ids=exclude_ids
+        )
 
-    if len(similar_skus) >= 2:
+        # Category-strict exhaustion - see run_customer_agent's identical
+        # check for why this only fires on a genuine "no more options in this
+        # category" case, never a coincidental 0-match elsewhere.
+        if category_filter and exclude_ids and len(similar_skus) == 0:
+            state["reply_text"] = "Maaf kijiyega, is category mein bas itne hi options uplabdh hain."
+            state["reply_tts_text"] = "माफ़ कीजियेगा, इस केटेगरी में बस इतने ही ऑप्शन उपलब्ध हैं।"
+            state["reply_product_options"] = None
+            state["reply_image_url"] = None
+
+            latency = int((time.time() - t_start) * 1000)
+            log_event = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "agent": "CatalogAgent",
+                "action": "Category Exhausted",
+                "latency_ms": latency,
+                "data": {"category": category_filter, "already_shown_count": len(exclude_ids)}
+            }
+            state["trace_logs"].append(log_event)
+            db_client.log_agent_event({
+                "session_id": whatsapp_number,
+                "event_type": "catalog_category_exhausted",
+                "agent_name": "CatalogAgent",
+                "latency_ms": latency,
+                "payload": log_event["data"]
+            })
+            return state
+
+    # Threshold is 1 (not 2) when category_filter is active - see
+    # run_customer_agent's identical picker_threshold for the reasoning.
+    picker_threshold = 1 if category_filter else 2
+    if len(similar_skus) >= picker_threshold:
         # Ambiguous - pause the auto-draft and ask the reseller which SKU they
         # mean instead. Nothing is written to PENDING_LISTINGS yet; the
         # selection is resolved by check_pending_selection on the next turn.
@@ -978,10 +1139,13 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             }
             for p in similar_skus[:4]
         ]
-        PENDING_SELECTIONS[_pending_key(whatsapp_number, active_mode)] = {
+        PENDING_SELECTIONS[session_key] = {
             "agent": "catalog",
             "options": options,
         }
+        if category_filter:
+            shown = SHOWN_PRODUCT_IDS.setdefault(session_key, [])
+            shown.extend(p.get("product_id") for p in similar_skus[:4] if p.get("product_id"))
         state["reply_text"] = "Didi, mujhe catalog me kuch milte-julte options mile hain. Kripya bataiye kaunsa item list karna hai:"
         state["reply_tts_text"] = "दीदी, मुझे कैटलॉग में कुछ मिलते-जुलते ऑप्शन मिले हैं। कृपया बताइये कौनसा आइटम लिस्ट करना है।"
         state["reply_product_options"] = options
@@ -993,7 +1157,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "agent": "CatalogAgent",
             "action": "Multiple SKU Matches - Awaiting Selection",
             "latency_ms": latency,
-            "data": {"matched_catalog_items_count": len(similar_skus)}
+            "data": {"matched_catalog_items_count": len(similar_skus), "category_filter": category_filter}
         }
         state["trace_logs"].append(log_event)
         db_client.log_agent_event({
@@ -1049,7 +1213,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
 
         # Human-in-the-loop: hold the draft and wait for explicit reseller approval
         # before it's saved/posted (see check_pending_approval / finalize_catalog_listing).
-        PENDING_LISTINGS[_pending_key(whatsapp_number, active_mode)] = {
+        PENDING_LISTINGS[session_key] = {
             "listing_payload": listing_payload,
             "base_image_url": base_image_url,
             "matched_product_name": matched_product.get("name"),
@@ -1193,6 +1357,8 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
 
+    session_key = _pending_key(whatsapp_number, active_mode)
+
     # Exact-name lookup first - this is how a customer's tap on a ProductGrid
     # option (see check_pending_selection / ProductGrid.jsx) arrives back
     # here: the frontend sends the option's exact product name as the next
@@ -1201,9 +1367,24 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     # similarly-named SKUs and show the picker again.
     exact_match = db_client.get_product_by_name(user_input)
 
+    category_filter = None
     if exact_match:
         similar_skus = [exact_match]
     else:
+        # Category-strict pagination: figure out which real category (if
+        # any) this message is scoped to - see extract_category_intent's
+        # docstring for why this is a CONTEXT-narrowing hint only, never a
+        # routing decision, so it can never collide with Priority 1/2 below.
+        category_intent = extract_category_intent(user_input, LAST_REQUESTED_CATEGORY.get(session_key))
+        if category_intent in REAL_CATEGORIES:
+            category_filter = category_intent
+            if category_filter != LAST_REQUESTED_CATEGORY.get(session_key):
+                # Genuinely new category - old exclusions no longer apply.
+                SHOWN_PRODUCT_IDS[session_key] = []
+            LAST_REQUESTED_CATEGORY[session_key] = category_filter
+
+        exclude_ids = SHOWN_PRODUCT_IDS.get(session_key, []) if category_filter else []
+
         # 1. Generate text embedding using Gemini
         embedding = []
         if configure_gemini():
@@ -1218,19 +1399,56 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
             except Exception as e:
                 logger.error(f"Embedding generation failed in Customer Agent: {e}")
 
-        # 2. Query Supabase vector similarity matching - up to 4 candidates.
-        # NOTE: ambiguity among these is NOT decided here anymore - see below.
-        # A phrase like "mujhe ye khareedna hai" or "saree wapas karni hai" has
-        # no specific product attributes in it, so a naive match-count check
-        # right here would misfire on generic purchase/return phrases just as
-        # easily as on a genuine multi-SKU product query, hijacking the turn
-        # before Priority 1/2 below ever get a chance to run - that was the
-        # actual cause of the "purchase intent loops back into product
-        # suggestions" bug. Priority 1/2 must always be checked FIRST, via the
-        # same LLM call that would otherwise attempt a grounded answer; only
-        # if none of them apply AND the model itself couldn't confidently
-        # ground an answer do we fall back to showing a picker (further down).
-        similar_skus = db_client.match_products(embedding, threshold=0.15, limit=4)
+        # 2. Query Supabase vector similarity matching - up to 4 candidates,
+        # strictly within category_filter (if the message was scoped to one)
+        # and excluding whatever this session was already shown in that
+        # category (pagination). NOTE: ambiguity among these is NOT decided
+        # here anymore - see below. A phrase like "mujhe ye khareedna hai" or
+        # "saree wapas karni hai" has no specific product attributes in it,
+        # so a naive match-count check right here would misfire on generic
+        # purchase/return phrases just as easily as on a genuine multi-SKU
+        # product query, hijacking the turn before Priority 1/2 below ever
+        # get a chance to run - that was the actual cause of the "purchase
+        # intent loops back into product suggestions" bug. Priority 1/2 must
+        # always be checked FIRST, via the same LLM call that would otherwise
+        # attempt a grounded answer; only if none of them apply AND the model
+        # itself couldn't confidently ground an answer do we fall back to
+        # showing a picker (further down).
+        similar_skus = db_client.match_products(
+            embedding, threshold=0.15, limit=4,
+            category_filter=category_filter, exclude_ids=exclude_ids
+        )
+
+        # Category-strict exhaustion: only short-circuits here when we were
+        # explicitly continuing a category-scoped browse (exclude_ids
+        # non-empty means this session had already been shown something in
+        # this category) and filtering left nothing - a genuine "no more
+        # options" case. A coincidental 0-match on an unrelated message
+        # (return/purchase/etc.) never reaches this, since exclude_ids is
+        # only ever populated once a category browse has actually started.
+        if category_filter and exclude_ids and len(similar_skus) == 0:
+            state["reply_text"] = "Maaf kijiyega, is category mein bas itne hi options uplabdh hain."
+            state["reply_tts_text"] = "माफ़ कीजियेगा, इस केटेगरी में बस इतने ही ऑप्शन उपलब्ध हैं।"
+            state["reply_product_options"] = None
+            state["reply_image_url"] = None
+
+            latency = int((time.time() - t_start) * 1000)
+            log_event = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "agent": "CustomerAgent",
+                "action": "Category Exhausted",
+                "latency_ms": latency,
+                "data": {"category": category_filter, "already_shown_count": len(exclude_ids)}
+            }
+            state["trace_logs"].append(log_event)
+            db_client.log_agent_event({
+                "session_id": whatsapp_number,
+                "event_type": "customer_category_exhausted",
+                "agent_name": "CustomerAgent",
+                "latency_ms": latency,
+                "payload": log_event["data"]
+            })
+            return state
 
     def _format_product_line(p: Dict[str, Any]) -> str:
         return (
@@ -1249,7 +1467,7 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     # docstring above) - the referent for a bare confirmation like "isko order
     # kar do" that doesn't repeat the product name, since that phrase's own
     # vector search below has nothing product-specific to match against.
-    recent_product = LAST_VIEWED_PRODUCT.get(_pending_key(whatsapp_number, active_mode))
+    recent_product = LAST_VIEWED_PRODUCT.get(session_key)
     recent_context_str = _format_product_line(recent_product) if recent_product else "None."
 
     # Single system prompt covering every turn - Priority 1 (Return Retention
@@ -1361,10 +1579,9 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         # one. Used both for a more useful trace log entry and to give the
         # Reseller segment's Notification Bell a real product name/price.
         confirmed_product = similar_skus[0] if len(similar_skus) == 1 else recent_product
-        pending_key = _pending_key(whatsapp_number, active_mode)
         # Order is placed - clear the remembered item so a stray later
         # message doesn't "confirm" the same purchase a second time.
-        LAST_VIEWED_PRODUCT.pop(pending_key, None)
+        LAST_VIEWED_PRODUCT.pop(session_key, None)
 
         state["reply_purchase_intent_detected"] = True
         state["reply_confirmed_product_name"] = confirmed_product.get("name") if confirmed_product else None
@@ -1401,7 +1618,14 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     # purchase_intent_detected already returned early above; return_retention_
     # triggered is guarded here explicitly since it falls through to the
     # PENDING_RETURNS handoff further below, not an early return.)
-    if not return_retention_triggered and not answered_from_product_context and len(similar_skus) >= 2:
+    #
+    # Threshold is 1 (not 2) when category_filter is active: a category-
+    # scoped "show more" that has exactly one item left should still render
+    # as a picker (consistent, tappable pagination UI), not silently switch
+    # into the single-item prose-answer flow below, which exists for a
+    # different case (a specific already-identified item).
+    picker_threshold = 1 if category_filter else 2
+    if not return_retention_triggered and not answered_from_product_context and len(similar_skus) >= picker_threshold:
         options = [
             {
                 "name": p.get("name"),
@@ -1410,10 +1634,15 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
             }
             for p in similar_skus[:4]
         ]
-        PENDING_SELECTIONS[_pending_key(whatsapp_number, active_mode)] = {
+        PENDING_SELECTIONS[session_key] = {
             "agent": "customer",
             "options": options,
         }
+        if category_filter:
+            # Pagination memory: never show these same items again for the
+            # rest of this category's browse (see SHOWN_PRODUCT_IDS docstring).
+            shown = SHOWN_PRODUCT_IDS.setdefault(session_key, [])
+            shown.extend(p.get("product_id") for p in similar_skus[:4] if p.get("product_id"))
         state["reply_text"] = "Ji, mujhe kuch milte-julte options mile hain. Kripya bataiye aapko kis item ke baare mein jaanna hai:"
         state["reply_tts_text"] = "जी, मुझे कुछ मिलते-जुलते ऑप्शन मिले हैं। कृपया बताइये आपको किस आइटम के बारे में जानना है।"
         state["reply_product_options"] = options
@@ -1425,7 +1654,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
             "agent": "CustomerAgent",
             "action": "Multiple SKU Matches - Awaiting Selection",
             "latency_ms": latency,
-            "data": {"matched_catalog_items_count": len(similar_skus)}
+            "data": {"matched_catalog_items_count": len(similar_skus), "category_filter": category_filter}
         }
         state["trace_logs"].append(log_event)
         db_client.log_agent_event({

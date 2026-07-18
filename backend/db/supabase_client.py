@@ -239,12 +239,40 @@ class SupabaseDB:
             logger.error(f"Error in get_product_by_name: {e}")
             return None
 
-    def match_products(self, query_embedding: list, threshold: float = 0.3, limit: int = 3) -> list:
-        """Semantic search over the product vector catalog in Supabase."""
+    def match_products(
+        self,
+        query_embedding: list,
+        threshold: float = 0.3,
+        limit: int = 3,
+        category_filter: Optional[str] = None,
+        exclude_ids: Optional[list] = None,
+    ) -> list:
+        """Semantic search over the product vector catalog in Supabase.
+
+        category_filter/exclude_ids power category-strict pagination (see
+        run_customer_agent/run_catalog_agent's "show more" handling): the
+        underlying match_products Postgres RPC only does vector similarity,
+        with no category or exclusion-list parameter, and there's no live
+        access here to alter that RPC's SQL. So instead we over-fetch a wider
+        similarity-ranked candidate pool from the RPC unchanged, then apply
+        the category/exclusion filtering in Python before slicing back down
+        to `limit` - functionally equivalent to a `WHERE category = ... AND
+        id NOT IN (...) LIMIT n` clause, just evaluated client-side.
+        """
+        exclude_set = set(exclude_ids or [])
+
+        def _apply_filters(items: list) -> list:
+            filtered = [
+                p for p in items
+                if p.get("product_id") not in exclude_set
+                and (category_filter is None or p.get("category") == category_filter)
+            ]
+            return filtered[:limit]
+
         if self.is_mock() or not query_embedding:
             # Return static fallback catalog items matching RAG
             logger.warning("[RAG] Supabase connection is mock, returning static catalog mock values.")
-            return [
+            mock_catalog = [
                 {
                     "product_id": "SKU_001",
                     "name": "Red Banarasi Silk Saree",
@@ -274,16 +302,37 @@ class SupabaseDB:
                     "base_image_url": "https://images.unsplash.com/photo-1769063382706-8156b3b33eac?w=600&q=80"
                 }
             ]
+            return _apply_filters(mock_catalog)
         try:
+            # Over-fetch well past `limit` so there's still enough left after
+            # category/exclusion filtering - a plain `match_count: limit`
+            # would starve pagination almost immediately once a few items in
+            # the category had already been shown/excluded.
+            #
+            # When category_filter is set, also relax match_threshold to ~0:
+            # the RPC applies that threshold SERVER-SIDE, before Python ever
+            # sees the candidates, so a generic "show more" continuation
+            # phrase (weak/no embedding correlation to any specific product)
+            # would otherwise get many genuinely-in-category items filtered
+            # out by similarity before category filtering even runs -
+            # falsely "exhausting" a category that still has items left. A
+            # category-strict browse doesn't need similarity ranking at all
+            # (any item in the category is a valid result - see the
+            # docstring's note on ordering); fetch_count is set high enough
+            # to realistically cover this catalog's full category sizes
+            # (~12-22 items each) so every real item gets a chance to surface.
+            effective_threshold = 0.0 if category_filter else threshold
+            fetch_count = 100 if category_filter else (max(limit * 5, 20) if exclude_set else limit)
             res = self.client.rpc(
                 "match_products",
                 {
                     "query_embedding": query_embedding,
-                    "match_threshold": threshold,
-                    "match_count": limit
+                    "match_threshold": effective_threshold,
+                    "match_count": fetch_count
                 }
             ).execute()
-            return res.data or []
+            candidates = res.data or []
+            return _apply_filters(candidates) if (category_filter or exclude_set) else candidates
         except Exception as e:
             logger.error(f"Error in match_products RPC: {e}")
             return []
