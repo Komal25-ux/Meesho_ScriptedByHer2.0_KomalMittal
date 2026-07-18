@@ -327,6 +327,17 @@ class SakhiState(TypedDict):
     listing_broadcast_caption: Optional[str]
     listing_broadcast_caption_tts: Optional[str]
 
+    # Set when this turn confirmed a customer purchase (Priority 2 in
+    # run_customer_agent), so the API layer can surface it to the Reseller
+    # segment's Notification Bell.
+    reply_purchase_intent_detected: bool
+    reply_confirmed_product_name: Optional[str]
+    reply_confirmed_product_price: Optional[int]
+    # Set when this turn was a terminal Returns Retention Funnel handoff to
+    # the human reseller (Scenario A hard-return or Scenario E exchange-
+    # confirmed - see check_pending_return), for the same Notification Bell.
+    reply_handoff_triggered: bool
+
     # Tracking telemetry for dashboard
     trace_logs: List[Dict[str, Any]]
 
@@ -689,6 +700,10 @@ def check_pending_return(state: SakhiState) -> SakhiState:
                 "trigger_text": raw_input,
             },
         })
+        # Scenario A (hard return) or E (exchange confirmed) - the conversation
+        # is now handed off to the human reseller either way, for the same
+        # Notification Bell purchase_intent_detected feeds on the Customer side.
+        state["reply_handoff_triggered"] = True
     else:
         PENDING_RETURNS[pending_key] = pending
 
@@ -1335,13 +1350,17 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
 
         # The confirmed item is whichever one resolved condition (b) above -
         # this message's own single match, or else the carried-over recent
-        # one. Purely for a more useful trace log entry; the confirmation
-        # reply itself is the same mandated string regardless.
+        # one. Used both for a more useful trace log entry and to give the
+        # Reseller segment's Notification Bell a real product name/price.
         confirmed_product = similar_skus[0] if len(similar_skus) == 1 else recent_product
         pending_key = _pending_key(whatsapp_number, active_mode)
         # Order is placed - clear the remembered item so a stray later
         # message doesn't "confirm" the same purchase a second time.
         LAST_VIEWED_PRODUCT.pop(pending_key, None)
+
+        state["reply_purchase_intent_detected"] = True
+        state["reply_confirmed_product_name"] = confirmed_product.get("name") if confirmed_product else None
+        state["reply_confirmed_product_price"] = confirmed_product.get("suggested_selling_price_inr") if confirmed_product else None
 
         latency = int((time.time() - t_start) * 1000)
         log_event = {

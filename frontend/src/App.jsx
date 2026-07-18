@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import MessageBubble from './components/chat/MessageBubble';
 import VoiceRecorder from './components/chat/VoiceRecorder';
+import NotificationBell from './components/chat/NotificationBell';
 import AgentTraceLog from './components/dashboard/AgentTraceLog';
 
 import { 
@@ -67,6 +68,18 @@ export default function App() {
   const [textInput, setTextInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [traceLogs, setTraceLogs] = useState([]);
+
+  // Reseller-side Notification Bell - bridges the Customer segment's
+  // terminal outcomes (order confirmed, return/exchange handed off) into a
+  // visible alert on the Reseller segment, since the two are otherwise
+  // fully separate chat histories with no shared view.
+  const [notifications, setNotifications] = useState([]);
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+
+  const markNotificationRead = (id) => {
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+    setIsNotifOpen(false);
+  };
   const [viewMode, setViewMode] = useState('chat'); // 'chat' or 'trace' on mobile
   const [activeTab, setActiveTab] = useState('logs'); // 'logs' or 'sales' on dashboard
   const [leftWidthPct, setLeftWidthPct] = useState(50); // draggable chat/judge panel split
@@ -227,6 +240,30 @@ export default function App() {
     }]);
   };
 
+  // Bridges a terminal Customer-segment outcome (order confirmed, or a
+  // return/exchange handed off) into a Reseller-side Notification Bell alert -
+  // only called for /chat/send responses received while in Customer mode.
+  const notifyFromCustomerResponse = (data) => {
+    if (data.purchase_intent_detected) {
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'order',
+          customer: 'Payal',
+          product: data.confirmed_product_name || 'item',
+          price: data.confirmed_product_price ?? '',
+          read: false
+        },
+        ...prev
+      ]);
+    } else if (data.handoff_triggered) {
+      setNotifications((prev) => [
+        { id: Date.now(), type: 'handoff', customer: 'Payal', read: false },
+        ...prev
+      ]);
+    }
+  };
+
   // Judge Dashboard "system trigger" button: simulates a backend event (e.g. a
   // return initiated in the reseller's Meesho seller dashboard) that makes
   // Sakhi proactively message the customer, unprompted. Distinct from the
@@ -291,6 +328,7 @@ export default function App() {
         voice_fallback: data.voice_fallback
       }]);
       broadcastListingToCustomers(data);
+      if (activeMode === 'customer') notifyFromCustomerResponse(data);
     } catch (err) {
       console.error("Error sending text message:", err);
       setCurrentMessages((prev) => [...prev, {
@@ -338,6 +376,7 @@ export default function App() {
         }];
       });
       broadcastListingToCustomers(data);
+      if (activeMode === 'customer') notifyFromCustomerResponse(data);
     } catch (err) {
       console.error("Error sending audio blob:", err);
       setCurrentMessages((prev) => [...prev, {
@@ -419,14 +458,27 @@ export default function App() {
               </div>
             </div>
             
-            {/* Reset chat */}
-            <button
-              onClick={() => loadGreeting(activeMode)}
-              className="text-meesho-jamuni hover:text-meesho-pink border border-transparent p-1.5 rounded-full hover:bg-white transition active:translate-y-[1px]"
-              title="Reset Conversation"
-            >
-              <RefreshCcw className="w-4 h-4" />
-            </button>
+            <div className="flex items-center space-x-1">
+              {/* Reseller-only: alerts for order confirmations / return handoffs
+                  arriving from the Customer segment */}
+              {activeMode === 'reseller' && (
+                <NotificationBell
+                  notifications={notifications}
+                  isOpen={isNotifOpen}
+                  onToggle={() => setIsNotifOpen((prev) => !prev)}
+                  onMarkRead={markNotificationRead}
+                />
+              )}
+
+              {/* Reset chat */}
+              <button
+                onClick={() => loadGreeting(activeMode)}
+                className="text-meesho-jamuni hover:text-meesho-pink border border-transparent p-1.5 rounded-full hover:bg-white transition active:translate-y-[1px]"
+                title="Reset Conversation"
+              >
+                <RefreshCcw className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           {/* Reseller / Customer Mode Toggle */}

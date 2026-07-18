@@ -113,6 +113,10 @@ async def chat_send(
             "listing_finalized": False,
             "listing_broadcast_caption": None,
             "listing_broadcast_caption_tts": None,
+            "reply_purchase_intent_detected": False,
+            "reply_confirmed_product_name": None,
+            "reply_confirmed_product_price": None,
+            "reply_handoff_triggered": False,
             "trace_logs": [],
             "context_data": None
         }
@@ -166,7 +170,11 @@ async def chat_send(
             "voice_fallback": voice_fallback,
             "listing_finalized": bool(result.get("listing_finalized")),
             "broadcast_caption": result.get("listing_broadcast_caption"),
-            "broadcast_audio": broadcast_audio_b64
+            "broadcast_audio": broadcast_audio_b64,
+            "purchase_intent_detected": bool(result.get("reply_purchase_intent_detected")),
+            "confirmed_product_name": result.get("reply_confirmed_product_name"),
+            "confirmed_product_price": result.get("reply_confirmed_product_price"),
+            "handoff_triggered": bool(result.get("reply_handoff_triggered"))
         }
 
     except Exception as e:
