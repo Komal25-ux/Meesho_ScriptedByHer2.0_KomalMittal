@@ -1,61 +1,106 @@
-// Mock 2-month (May-June) sales history for demo reseller Sunita Didi, for
-// future Growth Analytics dashboards. Every productName/selling-price/cost
-// pair below is copied verbatim from the real seeded catalog in
-// scripts/seed_catalog.py (see build_catalog()) - no invented products.
+// Mock 2-month (May 20 - July 19, 2026) daily sales history for demo reseller
+// Sunita Didi, feeding the Growth Analytics dashboard's Weekly/Monthly + Category
+// Breakdown views. Every productName/selling-price/cost pair is copied verbatim
+// from the real seeded catalog in scripts/seed_catalog.py - no invented products,
+// and `category` uses that same catalog's real categories (Sarees/Kurtis/Suits/
+// Tops/Lehengas/Dresses) - no invented ones (e.g. no "Jewellery", since that
+// category doesn't exist in the seeded catalog).
 //
-// Quantity follows real reseller economics: cheap daily-wear items (kurtis,
-// tops, ~Rs 300-450) sell in bulk per transaction, while premium/occasion
-// pieces (bridal lehenga, flagship sarees/suits, Rs 1200+) sell in single
-// units but carry a much larger per-unit margin.
+// Anchored to end exactly on 2026-07-19 ("today" for this demo) so the dashboard's
+// last-7-day / last-30-day windows land on real data. Deliberately high-variance,
+// day-by-day (not week-bucketed) generation: ~8% of days have zero sales, weekends
+// get a Kurti quantity surge (14-30 units), and ~7% of days get a rare high-margin
+// Saree/Lehenga/Suit spike - so the daily chart actually looks like a real business
+// (some slow days, some huge days) instead of a smooth curve.
 //
 // revenue = sellingPrice * quantity, profit = (sellingPrice - costPrice) * quantity.
-//
-// Transaction dates are spread as evenly as possible across the 9 weeks the
-// range spans (~4-5 transactions/week) rather than tapering off toward June -
-// an uneven count-per-week is what made the weekly-aggregated chart read as
-// an overall decline even though nothing about the underlying sales was
-// actually declining. Week-over-week totals still zigzag naturally (a real
-// business has good and bad weeks), but the overall trend is flat-to-up.
 
 export const mockSalesData = [
-  { id: 'TXN-001', productName: 'Navy Blue Cotton Kurti', category: 'kurtis', quantity: 3, revenue: 1287, profit: 387, date: '2025-05-01' },
-  { id: 'TXN-002', productName: 'Black Cotton Kurti and Pant Set', category: 'kurtis', quantity: 1, revenue: 499, profit: 149, date: '2025-05-04' },
-  { id: 'TXN-003', productName: 'Yellow Cotton Kurti', category: 'kurtis', quantity: 6, revenue: 2394, profit: 714, date: '2025-05-05' },
-  { id: 'TXN-004', productName: 'White Rayon Top', category: 'tops', quantity: 5, revenue: 1645, profit: 495, date: '2025-05-06' },
-  { id: 'TXN-005', productName: 'Basic Blue Cotton Top', category: 'tops', quantity: 3, revenue: 897, profit: 297, date: '2025-05-07' },
-  { id: 'TXN-006', productName: 'White Rayon Top', category: 'tops', quantity: 5, revenue: 1645, profit: 495, date: '2025-05-09' },
-  { id: 'TXN-007', productName: 'Royal Banarasi Silk Saree', category: 'sarees', quantity: 1, revenue: 1499, profit: 449, date: '2025-05-10' },
-  { id: 'TXN-008', productName: 'Black Cotton Kurti and Pant Set', category: 'kurtis', quantity: 2, revenue: 998, profit: 298, date: '2025-05-11' },
-  { id: 'TXN-009', productName: 'Navy Blue Cotton Kurti', category: 'kurtis', quantity: 4, revenue: 1716, profit: 516, date: '2025-05-13' },
-  { id: 'TXN-010', productName: 'Basic Blue Cotton Kurti', category: 'kurtis', quantity: 7, revenue: 2793, profit: 833, date: '2025-05-16' },
-  { id: 'TXN-011', productName: 'Black Cotton Kurti and Pant Set', category: 'kurtis', quantity: 1, revenue: 499, profit: 149, date: '2025-05-17' },
-  { id: 'TXN-012', productName: 'White Rayon Top', category: 'tops', quantity: 6, revenue: 1974, profit: 594, date: '2025-05-18' },
-  { id: 'TXN-013', productName: 'Yellow Cotton Kurti', category: 'kurtis', quantity: 7, revenue: 2793, profit: 833, date: '2025-05-20' },
-  { id: 'TXN-014', productName: 'Blue Georgette Saree', category: 'sarees', quantity: 3, revenue: 1497, profit: 477, date: '2025-05-22' },
-  { id: 'TXN-015', productName: 'Navy Blue Cotton Kurti', category: 'kurtis', quantity: 5, revenue: 2145, profit: 645, date: '2025-05-23' },
-  { id: 'TXN-016', productName: 'Basic Blue Cotton Top', category: 'tops', quantity: 4, revenue: 1196, profit: 396, date: '2025-05-26' },
-  { id: 'TXN-017', productName: 'Basic Blue Cotton Kurti', category: 'kurtis', quantity: 5, revenue: 1995, profit: 595, date: '2025-05-27' },
-  { id: 'TXN-018', productName: 'Basic Blue Cotton Top', category: 'tops', quantity: 8, revenue: 2392, profit: 792, date: '2025-05-30' },
-  { id: 'TXN-019', productName: 'Blue Georgette Saree', category: 'sarees', quantity: 3, revenue: 1497, profit: 477, date: '2025-06-01' },
-  { id: 'TXN-020', productName: 'Basic Blue Cotton Kurti', category: 'kurtis', quantity: 6, revenue: 2394, profit: 714, date: '2025-06-03' },
-  { id: 'TXN-021', productName: 'Grand Anarkali Suit', category: 'suits', quantity: 1, revenue: 1199, profit: 359, date: '2025-06-04' },
-  { id: 'TXN-022', productName: 'Basic Blue Cotton Kurti', category: 'kurtis', quantity: 8, revenue: 3192, profit: 952, date: '2025-06-05' },
-  { id: 'TXN-023', productName: 'Navy Blue Cotton Kurti', category: 'kurtis', quantity: 7, revenue: 3003, profit: 903, date: '2025-06-06' },
-  { id: 'TXN-024', productName: 'Red Georgette Palazzo Suit', category: 'suits', quantity: 2, revenue: 1598, profit: 498, date: '2025-06-08' },
-  { id: 'TXN-025', productName: 'Yellow Cotton Kurti', category: 'kurtis', quantity: 7, revenue: 2793, profit: 833, date: '2025-06-09' },
-  { id: 'TXN-026', productName: 'Basic Blue Cotton Kurti', category: 'kurtis', quantity: 5, revenue: 1995, profit: 595, date: '2025-06-13' },
-  { id: 'TXN-027', productName: 'Navy Blue Cotton Kurti', category: 'kurtis', quantity: 8, revenue: 3432, profit: 1032, date: '2025-06-15' },
-  { id: 'TXN-028', productName: 'Black Cotton Kurti and Pant Set', category: 'kurtis', quantity: 2, revenue: 998, profit: 298, date: '2025-06-16' },
-  { id: 'TXN-029', productName: 'Yellow Cotton Kurti', category: 'kurtis', quantity: 8, revenue: 3192, profit: 952, date: '2025-06-18' },
-  { id: 'TXN-030', productName: 'Basic Blue Cotton Kurti', category: 'kurtis', quantity: 4, revenue: 1596, profit: 476, date: '2025-06-21' },
-  { id: 'TXN-031', productName: 'White Rayon Top', category: 'tops', quantity: 4, revenue: 1316, profit: 396, date: '2025-06-22' },
-  { id: 'TXN-032', productName: 'Red Silk Bridal Lehenga', category: 'lehengas', quantity: 1, revenue: 2499, profit: 749, date: '2025-06-23' },
-  { id: 'TXN-033', productName: 'Basic Blue Cotton Top', category: 'tops', quantity: 3, revenue: 897, profit: 297, date: '2025-06-24' },
-  { id: 'TXN-034', productName: 'Multicolor Bandhani Saree', category: 'sarees', quantity: 1, revenue: 549, profit: 229, date: '2025-06-25' },
-  { id: 'TXN-035', productName: 'Basic Blue Cotton Top', category: 'tops', quantity: 9, revenue: 2691, profit: 891, date: '2025-06-26' },
-  { id: 'TXN-036', productName: 'Navy Blue Cotton Kurti', category: 'kurtis', quantity: 9, revenue: 3861, profit: 1161, date: '2025-06-28' },
-  { id: 'TXN-037', productName: 'Yellow Cotton Kurti', category: 'kurtis', quantity: 6, revenue: 2394, profit: 714, date: '2025-06-29' },
-  { id: 'TXN-038', productName: 'Blue Georgette Saree', category: 'sarees', quantity: 1, revenue: 499, profit: 159, date: '2025-06-30' },
+  { id: 'TXN-001', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 1, revenue: 499, profit: 159, date: '2026-05-21' },
+  { id: 'TXN-002', productName: 'Navy Blue Bodycon Dress', category: 'Dresses', quantity: 3, revenue: 1647, profit: 507, date: '2026-05-21' },
+  { id: 'TXN-003', productName: 'Red Wrap Dress', category: 'Dresses', quantity: 3, revenue: 1647, profit: 507, date: '2026-05-22' },
+  { id: 'TXN-004', productName: 'Basic Blue Cotton Top', category: 'Tops', quantity: 2, revenue: 598, profit: 198, date: '2026-05-22' },
+  { id: 'TXN-005', productName: 'Yellow Georgette Kurti', category: 'Kurtis', quantity: 5, revenue: 2245, profit: 695, date: '2026-05-23' },
+  { id: 'TXN-006', productName: 'Floral Print Crepe Dress', category: 'Dresses', quantity: 3, revenue: 1497, profit: 447, date: '2026-05-24' },
+  { id: 'TXN-007', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 16, revenue: 6864, profit: 2064, date: '2026-05-24' },
+  { id: 'TXN-008', productName: 'Yellow Georgette Kurti', category: 'Kurtis', quantity: 6, revenue: 2694, profit: 834, date: '2026-05-25' },
+  { id: 'TXN-009', productName: 'White Rayon Top', category: 'Tops', quantity: 2, revenue: 658, profit: 198, date: '2026-05-26' },
+  { id: 'TXN-010', productName: 'Red Wrap Dress', category: 'Dresses', quantity: 3, revenue: 1647, profit: 507, date: '2026-05-27' },
+  { id: 'TXN-011', productName: 'Mustard Cotton Top', category: 'Tops', quantity: 4, revenue: 1316, profit: 396, date: '2026-05-28' },
+  { id: 'TXN-012', productName: 'Basic Blue Cotton Top', category: 'Tops', quantity: 3, revenue: 897, profit: 297, date: '2026-05-29' },
+  { id: 'TXN-013', productName: 'Mustard Cotton Top', category: 'Tops', quantity: 2, revenue: 658, profit: 198, date: '2026-05-30' },
+  { id: 'TXN-014', productName: 'Multicolor Bandhani Saree', category: 'Sarees', quantity: 2, revenue: 1098, profit: 458, date: '2026-05-30' },
+  { id: 'TXN-015', productName: 'Basic Blue Cotton Kurti', category: 'Kurtis', quantity: 17, revenue: 6783, profit: 2023, date: '2026-05-30' },
+  { id: 'TXN-016', productName: 'Grey Georgette Saree', category: 'Sarees', quantity: 2, revenue: 998, profit: 318, date: '2026-05-31' },
+  { id: 'TXN-017', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 30, revenue: 12870, profit: 3870, date: '2026-05-31' },
+  { id: 'TXN-018', productName: 'White Rayon Top', category: 'Tops', quantity: 4, revenue: 1316, profit: 396, date: '2026-06-01' },
+  { id: 'TXN-019', productName: 'Royal Blue Kanjeevaram Silk Saree', category: 'Sarees', quantity: 3, revenue: 4197, profit: 1257, date: '2026-06-01' },
+  { id: 'TXN-020', productName: 'Red Wrap Dress', category: 'Dresses', quantity: 2, revenue: 1098, profit: 338, date: '2026-06-02' },
+  { id: 'TXN-021', productName: 'White Rayon Top', category: 'Tops', quantity: 5, revenue: 1645, profit: 495, date: '2026-06-03' },
+  { id: 'TXN-022', productName: 'Rani Pink Rayon Kurti', category: 'Kurtis', quantity: 2, revenue: 1098, profit: 338, date: '2026-06-04' },
+  { id: 'TXN-023', productName: 'Basic Blue Cotton Kurti', category: 'Kurtis', quantity: 5, revenue: 1995, profit: 595, date: '2026-06-05' },
+  { id: 'TXN-024', productName: 'Red Wrap Dress', category: 'Dresses', quantity: 1, revenue: 549, profit: 169, date: '2026-06-05' },
+  { id: 'TXN-025', productName: 'Yellow Georgette Kurti', category: 'Kurtis', quantity: 5, revenue: 2245, profit: 695, date: '2026-06-06' },
+  { id: 'TXN-026', productName: 'Yellow Cotton Kurti', category: 'Kurtis', quantity: 16, revenue: 6384, profit: 1904, date: '2026-06-06' },
+  { id: 'TXN-027', productName: 'Premium Net Anarkali Suit', category: 'Suits', quantity: 1, revenue: 1199, profit: 359, date: '2026-06-06' },
+  { id: 'TXN-028', productName: 'Black Cotton Kurti and Pant Set', category: 'Kurtis', quantity: 2, revenue: 998, profit: 298, date: '2026-06-07' },
+  { id: 'TXN-029', productName: 'Basic Blue Cotton Top', category: 'Tops', quantity: 4, revenue: 1196, profit: 396, date: '2026-06-08' },
+  { id: 'TXN-030', productName: 'Grey Georgette Saree', category: 'Sarees', quantity: 2, revenue: 998, profit: 318, date: '2026-06-08' },
+  { id: 'TXN-031', productName: 'Black Cotton Kurti and Pant Set', category: 'Kurtis', quantity: 3, revenue: 1497, profit: 447, date: '2026-06-09' },
+  { id: 'TXN-032', productName: 'Pink Net Lehenga', category: 'Lehengas', quantity: 1, revenue: 1399, profit: 419, date: '2026-06-09' },
+  { id: 'TXN-033', productName: 'Navy Blue Bodycon Dress', category: 'Dresses', quantity: 2, revenue: 1098, profit: 338, date: '2026-06-10' },
+  { id: 'TXN-034', productName: 'Basic Blue Cotton Top', category: 'Tops', quantity: 5, revenue: 1495, profit: 495, date: '2026-06-11' },
+  { id: 'TXN-035', productName: 'Yellow Banarasi Silk Saree', category: 'Sarees', quantity: 2, revenue: 2598, profit: 818, date: '2026-06-11' },
+  { id: 'TXN-036', productName: 'Floral Print Crepe Dress', category: 'Dresses', quantity: 2, revenue: 998, profit: 298, date: '2026-06-12' },
+  { id: 'TXN-037', productName: 'White Rayon Top', category: 'Tops', quantity: 4, revenue: 1316, profit: 396, date: '2026-06-13' },
+  { id: 'TXN-038', productName: 'Yellow Cotton Kurti', category: 'Kurtis', quantity: 29, revenue: 11571, profit: 3451, date: '2026-06-13' },
+  { id: 'TXN-039', productName: 'Black Cotton Kurti and Pant Set', category: 'Kurtis', quantity: 3, revenue: 1497, profit: 447, date: '2026-06-14' },
+  { id: 'TXN-040', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 28, revenue: 12012, profit: 3612, date: '2026-06-14' },
+  { id: 'TXN-041', productName: 'Basic Blue Cotton Top', category: 'Tops', quantity: 3, revenue: 897, profit: 297, date: '2026-06-15' },
+  { id: 'TXN-042', productName: 'Mustard Cotton Top', category: 'Tops', quantity: 3, revenue: 987, profit: 297, date: '2026-06-17' },
+  { id: 'TXN-043', productName: 'Black Cotton Kurti and Pant Set', category: 'Kurtis', quantity: 3, revenue: 1497, profit: 447, date: '2026-06-18' },
+  { id: 'TXN-044', productName: 'Rani Pink Rayon Kurti', category: 'Kurtis', quantity: 3, revenue: 1647, profit: 507, date: '2026-06-19' },
+  { id: 'TXN-045', productName: 'Red Wrap Dress', category: 'Dresses', quantity: 2, revenue: 1098, profit: 338, date: '2026-06-20' },
+  { id: 'TXN-046', productName: 'Basic Blue Cotton Kurti', category: 'Kurtis', quantity: 22, revenue: 8778, profit: 2618, date: '2026-06-20' },
+  { id: 'TXN-047', productName: 'Basic Blue Cotton Kurti', category: 'Kurtis', quantity: 4, revenue: 1596, profit: 476, date: '2026-06-21' },
+  { id: 'TXN-048', productName: 'Orange Cotton Kurti', category: 'Kurtis', quantity: 17, revenue: 7293, profit: 2193, date: '2026-06-21' },
+  { id: 'TXN-049', productName: 'Black Chanderi Suit Set', category: 'Suits', quantity: 1, revenue: 749, profit: 229, date: '2026-06-22' },
+  { id: 'TXN-050', productName: 'Yellow Banarasi Silk Saree', category: 'Sarees', quantity: 2, revenue: 2598, profit: 818, date: '2026-06-22' },
+  { id: 'TXN-051', productName: 'Mustard Cotton Top', category: 'Tops', quantity: 3, revenue: 987, profit: 297, date: '2026-06-23' },
+  { id: 'TXN-052', productName: 'Mustard Cotton Top', category: 'Tops', quantity: 3, revenue: 987, profit: 297, date: '2026-06-24' },
+  { id: 'TXN-053', productName: 'Floral Print Crepe Dress', category: 'Dresses', quantity: 1, revenue: 499, profit: 149, date: '2026-06-25' },
+  { id: 'TXN-054', productName: 'Grey Georgette Saree', category: 'Sarees', quantity: 2, revenue: 998, profit: 318, date: '2026-06-25' },
+  { id: 'TXN-055', productName: 'Green Georgette Lehenga', category: 'Lehengas', quantity: 1, revenue: 1299, profit: 399, date: '2026-06-27' },
+  { id: 'TXN-056', productName: 'Yellow Cotton Kurti', category: 'Kurtis', quantity: 25, revenue: 9975, profit: 2975, date: '2026-06-27' },
+  { id: 'TXN-057', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 4, revenue: 1716, profit: 516, date: '2026-06-28' },
+  { id: 'TXN-058', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 2, revenue: 998, profit: 318, date: '2026-06-28' },
+  { id: 'TXN-059', productName: 'White Rayon Top', category: 'Tops', quantity: 5, revenue: 1645, profit: 495, date: '2026-06-29' },
+  { id: 'TXN-060', productName: 'Yellow Georgette Kurti', category: 'Kurtis', quantity: 6, revenue: 2694, profit: 834, date: '2026-07-01' },
+  { id: 'TXN-061', productName: 'Orange Cotton Kurti', category: 'Kurtis', quantity: 6, revenue: 2574, profit: 774, date: '2026-07-02' },
+  { id: 'TXN-062', productName: 'Pink Net Lehenga', category: 'Lehengas', quantity: 1, revenue: 1399, profit: 419, date: '2026-07-03' },
+  { id: 'TXN-063', productName: 'Green Georgette Lehenga', category: 'Lehengas', quantity: 1, revenue: 1299, profit: 399, date: '2026-07-04' },
+  { id: 'TXN-064', productName: 'White Rayon Top', category: 'Tops', quantity: 2, revenue: 658, profit: 198, date: '2026-07-05' },
+  { id: 'TXN-065', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 2, revenue: 998, profit: 318, date: '2026-07-07' },
+  { id: 'TXN-066', productName: 'White Rayon Top', category: 'Tops', quantity: 3, revenue: 987, profit: 297, date: '2026-07-08' },
+  { id: 'TXN-067', productName: 'Yellow Cotton Kurti', category: 'Kurtis', quantity: 2, revenue: 798, profit: 238, date: '2026-07-09' },
+  { id: 'TXN-068', productName: 'Premium Net Anarkali Suit', category: 'Suits', quantity: 2, revenue: 2398, profit: 718, date: '2026-07-09' },
+  { id: 'TXN-069', productName: 'Orange Cotton Kurti', category: 'Kurtis', quantity: 6, revenue: 2574, profit: 774, date: '2026-07-10' },
+  { id: 'TXN-070', productName: 'Orange Cotton Kurti', category: 'Kurtis', quantity: 5, revenue: 2145, profit: 645, date: '2026-07-10' },
+  { id: 'TXN-071', productName: 'Basic Blue Cotton Kurti', category: 'Kurtis', quantity: 3, revenue: 1197, profit: 357, date: '2026-07-11' },
+  { id: 'TXN-072', productName: 'Mustard Cotton Top', category: 'Tops', quantity: 5, revenue: 1645, profit: 495, date: '2026-07-11' },
+  { id: 'TXN-073', productName: 'Orange Cotton Kurti', category: 'Kurtis', quantity: 5, revenue: 2145, profit: 645, date: '2026-07-12' },
+  { id: 'TXN-074', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 18, revenue: 7722, profit: 2322, date: '2026-07-12' },
+  { id: 'TXN-075', productName: 'Grey Georgette Saree', category: 'Sarees', quantity: 3, revenue: 1497, profit: 477, date: '2026-07-13' },
+  { id: 'TXN-076', productName: 'Sky Blue Cotton Suit', category: 'Suits', quantity: 1, revenue: 599, profit: 189, date: '2026-07-14' },
+  { id: 'TXN-077', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 3, revenue: 1497, profit: 477, date: '2026-07-14' },
+  { id: 'TXN-078', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 3, revenue: 1497, profit: 477, date: '2026-07-15' },
+  { id: 'TXN-079', productName: 'Green Georgette Lehenga', category: 'Lehengas', quantity: 1, revenue: 1299, profit: 399, date: '2026-07-16' },
+  { id: 'TXN-080', productName: 'White Rayon Top', category: 'Tops', quantity: 5, revenue: 1645, profit: 495, date: '2026-07-17' },
+  { id: 'TXN-081', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 1, revenue: 499, profit: 159, date: '2026-07-18' },
+  { id: 'TXN-082', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 2, revenue: 998, profit: 318, date: '2026-07-18' },
+  { id: 'TXN-083', productName: 'Blue Georgette Saree', category: 'Sarees', quantity: 3, revenue: 1497, profit: 477, date: '2026-07-19' },
+  { id: 'TXN-084', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 4, revenue: 1716, profit: 516, date: '2026-07-19' },
+  { id: 'TXN-085', productName: 'Navy Blue Cotton Kurti', category: 'Kurtis', quantity: 18, revenue: 7722, profit: 2322, date: '2026-07-19' },
 ];
 
 export default mockSalesData;
