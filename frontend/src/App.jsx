@@ -16,7 +16,7 @@ import {
 import MessageBubble from './components/chat/MessageBubble';
 import VoiceRecorder from './components/chat/VoiceRecorder';
 import NotificationBell from './components/chat/NotificationBell';
-import AgentTraceLog from './components/dashboard/AgentTraceLog';
+import TerminalTraceLog from './components/dashboard/TerminalTraceLog';
 
 import { 
   ResponsiveContainer, 
@@ -626,7 +626,7 @@ export default function App() {
           <div className="flex-1 min-h-0 p-4">
             {activeTab === 'logs' ? (
               <div className="h-full">
-                <AgentTraceLog logs={traceLogs} onClear={() => setTraceLogs([])} />
+                <TerminalTraceLog logs={traceLogs} onClear={() => setTraceLogs([])} />
               </div>
             ) : (
               <div className="h-full bg-meesho-white border border-meesho-dark rounded-xl p-4 shadow-tactile flex flex-col justify-between overflow-hidden">

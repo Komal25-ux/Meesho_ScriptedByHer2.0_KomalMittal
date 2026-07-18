@@ -751,10 +751,16 @@ You are the Orchestrator for Sakhi. You are talking DIRECTLY to an END CUSTOMER 
 Meesho reseller - not the reseller herself. Analyze the customer's input and route it to
 EXACTLY ONE of the following agents:
 1. CUSTOMER: Any product question - size, material, color, delivery, COD, return policy, availability,
-   AND any return/exchange/complaint request (the Customer agent has its own deflection rule for these).
+   AND any return/exchange/complaint request (the Customer agent has its own deflection rule for these),
+   AND any purchase/order confirmation, even a short one with no product details in it (the Customer
+   agent has its own logic for handling this - your job here is only to route it there, not to judge
+   whether it's specific enough).
    Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?",
-   "saree choti pad rahi hai, badalna hai", "mujhe ye wapas karna hai", "exchange option hai?"
-2. GENERAL: Greetings, or general chit-chat about what Sakhi can help with.
+   "saree choti pad rahi hai, badalna hai", "mujhe ye wapas karna hai", "exchange option hai?",
+   "isse order krdo", "ye lelo bas", "pack kar do", "confirm kardo", "haan yehi chahiye", "book it"
+2. GENERAL: Greetings, or general chit-chat about what Sakhi can help with. Do NOT use this bucket just
+   because a message is short or vague - a short purchase confirmation (see CUSTOMER examples above) is
+   never GENERAL.
    Examples: "hello sakhi", "aap kya kar sakti ho?", "thank you"
 
 User Input: "{user_input}"
@@ -808,6 +814,8 @@ Output ONLY a valid JSON block of the format:
             if any(w in user_lower for w in ["return", "wapas", "exchange", "badalna", "choti"]):
                 intent = "CUSTOMER"
             elif any(w in user_lower for w in ["size", "fabric", "material", "cod", "delivery", "kya ye", "hai"]):
+                intent = "CUSTOMER"
+            elif any(w in user_lower for w in ["order", "khareed", "pack", "confirm", "book", "lelo", "le lo", "chahiye"]):
                 intent = "CUSTOMER"
         else:
             if any(w in user_lower for w in ["list", "add", "daal", "saree ko list", "post"]):
