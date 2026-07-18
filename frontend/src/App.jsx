@@ -17,29 +17,70 @@ import MessageBubble from './components/chat/MessageBubble';
 import VoiceRecorder from './components/chat/VoiceRecorder';
 import NotificationBell from './components/chat/NotificationBell';
 import TerminalTraceLog from './components/dashboard/TerminalTraceLog';
+import { mockSalesData } from './data/mockSalesData';
 
-import { 
-  ResponsiveContainer, 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  Tooltip 
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip
 } from 'recharts';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws');
 
-// Mock chart data for weekly sales analytics dashboard
-const CHART_DATA = [
-  { day: 'Mon', sales: 1200, profit: 300 },
-  { day: 'Tue', sales: 1800, profit: 450 },
-  { day: 'Wed', sales: 1500, profit: 380 },
-  { day: 'Thu', sales: 2400, profit: 600 },
-  { day: 'Fri', sales: 2100, profit: 530 },
-  { day: 'Sat', sales: 3200, profit: 800 },
-  { day: 'Sun', sales: 2900, profit: 720 },
-];
+// Derives the sales chart's weekly {day, sales, profit} buckets straight from
+// mockSalesData's real transaction history (May-June), instead of a
+// hand-typed 7-day mock array - this is genuinely a 2-month dataset, so
+// weekly buckets (matching the panel's "Weekly Growth Analytics" label) fit
+// far better than a fixed Mon-Sun week.
+function buildWeeklyChartData(transactions) {
+  if (transactions.length === 0) return [];
+  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  const firstDate = new Date(`${sorted[0].date}T00:00:00`);
+
+  const buckets = new Map(); // weekIndex -> { sales, profit, weekStart }
+  for (const txn of sorted) {
+    const txnDate = new Date(`${txn.date}T00:00:00`);
+    const daysSinceStart = Math.round((txnDate - firstDate) / 86400000);
+    const weekIndex = Math.floor(daysSinceStart / 7);
+    if (!buckets.has(weekIndex)) {
+      const weekStart = new Date(firstDate);
+      weekStart.setDate(weekStart.getDate() + weekIndex * 7);
+      buckets.set(weekIndex, { sales: 0, profit: 0, weekStart });
+    }
+    const bucket = buckets.get(weekIndex);
+    bucket.sales += txn.revenue;
+    bucket.profit += txn.profit;
+  }
+
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, { sales, profit, weekStart }]) => ({
+      day: weekStart.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
+      sales,
+      profit
+    }));
+}
+
+// Best-selling category by total revenue, computed from the same dataset -
+// replaces what used to be a hardcoded "Sarees (Haldi)" label that had no
+// relationship to any actual data.
+function computeBestCategory(transactions) {
+  const totals = {};
+  for (const txn of transactions) {
+    totals[txn.category] = (totals[txn.category] || 0) + txn.revenue;
+  }
+  const [best] = Object.entries(totals).sort(([, a], [, b]) => b - a);
+  if (!best) return 'N/A';
+  const [category] = best;
+  return category.charAt(0).toUpperCase() + category.slice(1);
+}
+
+const CHART_DATA = buildWeeklyChartData(mockSalesData);
+const BEST_CATEGORY = computeBestCategory(mockSalesData);
 
 const GREETINGS = {
   reseller: 'Namaste Sunita didi! Main aapki AI Sakhi hu. Bolkar ya likhkar mujhse apne catalog, orders aur returns ki baatein kijiye. 🌸',
@@ -635,7 +676,7 @@ export default function App() {
                     <TrendingUp className="w-4 h-4 text-meesho-teal mr-1.5" />
                     Didi Sales Performance Chart (Weekly)
                   </h3>
-                  <p className="text-[11px] text-gray-500 mb-4 font-mono">Real-time aggregate data synchronized with Supabase DB</p>
+                  <p className="text-[11px] text-gray-500 mb-4 font-mono">May-June sales history, aggregated by week (demo data)</p>
                 </div>
 
                 {/* Responsive Chart */}
@@ -665,7 +706,7 @@ export default function App() {
                 <div className="mt-4 border-t border-dashed border-gray-300 pt-3 grid grid-cols-2 gap-4">
                   <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
                     <span className="text-[10px] text-gray-500 block uppercase font-mono">Best Category</span>
-                    <span className="text-sm font-bold text-meesho-jamuni">Sarees (Haldi)</span>
+                    <span className="text-sm font-bold text-meesho-jamuni">{BEST_CATEGORY}</span>
                   </div>
                   <div className="bg-meesho-light border border-meesho-dark p-2.5 rounded-lg text-center">
                     <span className="text-[10px] text-gray-500 block uppercase font-mono">Conversion Ratio</span>
