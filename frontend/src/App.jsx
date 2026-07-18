@@ -221,6 +221,7 @@ export default function App() {
       role: 'assistant',
       text: `📢 Naya product aaya hai!\n\n${data.broadcast_caption || data.text}`,
       image_url: data.image_url,
+      price: data.price,
       audio: data.broadcast_audio || null,
       voice_fallback: !data.broadcast_audio
     }]);
@@ -282,6 +283,7 @@ export default function App() {
         text: data.text,
         audio: data.audio,
         image_url: data.image_url,
+        price: data.price,
         voice_fallback: data.voice_fallback
       }]);
       broadcastListingToCustomers(data);
@@ -326,6 +328,7 @@ export default function App() {
           text: data.text,
           audio: data.audio,
           image_url: data.image_url,
+          price: data.price,
           voice_fallback: data.voice_fallback
         }];
       });

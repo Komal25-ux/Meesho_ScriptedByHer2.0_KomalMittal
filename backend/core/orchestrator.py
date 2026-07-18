@@ -8,7 +8,6 @@ import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
 from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse
-from backend.core.image_compositor import generate_ad_creative
 
 logger = logging.getLogger("sakhi-backend")
 
@@ -282,6 +281,10 @@ class SakhiState(TypedDict):
     reply_text: str
     reply_audio_b64: Optional[str]
     reply_image_url: Optional[str]
+    # Selling price for the product shown in reply_image_url, if any - rendered
+    # by the frontend as a PricePatch stitched below the image instead of an
+    # AI-composited price overlay baked into the image itself.
+    reply_price: Optional[int]
     # Pure Devanagari version of reply_text for Sarvam TTS (dual-output from
     # the same LLM call as reply_text). Falls back to reply_text at the API
     # layer if a node doesn't set this (e.g. deterministic template replies).
@@ -394,6 +397,7 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
                 f"क्या अब मैं इसे पोस्ट करूं?"
             )
             state["reply_image_url"] = pending["base_image_url"]
+            state["reply_price"] = new_price
             state["detected_intent"] = "CATALOG"
             state["pending_route"] = "price_updated"
         else:
@@ -909,6 +913,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             f"क्या मैं इसे पोस्ट करूं?"
         )
         state["reply_image_url"] = base_image_url
+        state["reply_price"] = selling_price
     else:
         reply_text = "Maaf kijiyega didi, mujhe catalog me is tarah ka koi kapda ya item nahi mila. Kya aap details check karke firse bolengi?"
         reply_tts_text = "माफ़ कीजियेगा दीदी, मुझे कैटलॉग में इस तरह का कोई कपड़ा या आइटम नहीं मिला। क्या आप डिटेल्स चेक करके फिर से बोलेंगी?"
@@ -963,27 +968,27 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     listing_payload = pending["listing_payload"]
     base_image_url = pending["base_image_url"]
 
-    ad_image_url = generate_ad_creative(base_image_url, pending["matched_product_name"], pending["selling_price"])
-    final_image_url = ad_image_url or base_image_url
-    listing_payload["image_url"] = final_image_url
+    # The product photo is used as-is - no compositing/AI generation of a
+    # price overlay onto the image. The price is rendered by the frontend as
+    # a separate PricePatch stitched below the image instead (see reply_price).
+    listing_payload["image_url"] = base_image_url
 
     db_client.save_listing(listing_payload)
 
     reply_text = (
         f"Ho gaya Didi! *{pending['matched_product_name']}* ₹{pending['selling_price']} me "
         f"live post ho gaya hai (profit ₹{pending['selling_price'] - pending['cost']}).\n\n"
-        + ("Maine iske liye ek promotional ad image bhi banayi hai! 🌸" if ad_image_url
-           else "Aapki listing product photo ke saath live hai! 🌸")
+        f"Aapki listing product photo ke saath live hai! 🌸"
     )
     reply_tts_text = (
         f"हो गया दीदी! {pending.get('matched_product_name_tts', pending['matched_product_name'])} "
         f"{pending['selling_price']} रुपये में लाइव पोस्ट हो गया है, प्रॉफिट {pending['selling_price'] - pending['cost']} रुपये होगा।\n\n"
-        + ("मैंने इसके लिए एक प्रोमोशनल ऐड इमेज भी बनायी है।" if ad_image_url
-           else "आपकी लिस्टिंग प्रोडक्ट फोटो के साथ लाइव है।")
+        f"आपकी लिस्टिंग प्रोडक्ट फोटो के साथ लाइव है।"
     )
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
-    state["reply_image_url"] = final_image_url
+    state["reply_image_url"] = base_image_url
+    state["reply_price"] = pending["selling_price"]
     state["detected_intent"] = "CATALOG"
     # Flags the API layer to broadcast this post into the Customer segment's
     # chat, simulating the listing reaching buyers.
@@ -1000,8 +1005,7 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
         "data": {
             "product_name": pending["matched_product_name"],
             "selling_price": pending["selling_price"],
-            "margin_profit": pending["selling_price"] - pending["cost"],
-            "ad_creative_generated": bool(ad_image_url)
+            "margin_profit": pending["selling_price"] - pending["cost"]
         }
     }
     state["trace_logs"].append(log_event)

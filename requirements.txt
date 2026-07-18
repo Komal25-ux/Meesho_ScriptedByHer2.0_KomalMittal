@@ -20,6 +20,3 @@ supabase
 # Audio processing
 ffmpeg-python
 websockets
-
-# Image compositing (catalog ad creative overlay)
-Pillow

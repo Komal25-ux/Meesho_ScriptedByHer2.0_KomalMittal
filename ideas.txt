@@ -1,0 +1,22 @@
+
+CATALOG TAB
+
+1- catalog tab, add a catalog button alongside the langraph logs and weekly growth analysis, this button will show reseller's catalog, here for every item show the item's image, name, price, stock
+2- highlight the product with a green glow aroung the border having major sales, and highlight the product with red glow around the border that is low in stock.
+3- items shall be in a grid format one row consisting of 2-3 items, and we can scroll to view the items below
+4- we can also add the margin along where we are showing name,price,stock over only the products that the reseller has listed, not all the items of her catalog.
+5- so for the margins, suppose while lisitng the product through catalog agent reseller sets the range from 300-500, the one resller bought at 200, the margin should show 100-200
+
+
+NEGOTIATE 
+1- so I was thinking we can add a negotitation range of the products, so how we can do so, that when sunita is going to list the prouduct through catalog agent, catalog agent should ask the range price of the product i.e the min and max price for the product, and when the customer is trying to negotitate, customer agent has the permission to decrease the price within the range set by reseller.
+2- if the customer's ask relies within the range, offer it but if it is below the the range offer the 10-20 rupess over the minimum price range
+3- the negotiation should be friendly
+4- if the customer persists on lowering the price further repeatedly, create a friendly message saying that sunita will talk to her later, sakhi has noted her request down.
+
+RETURN PROMPT
+okayy so rn I am thinking to create a prompt that should be direclty a part mf my code that will handle the return agent
+
+1- when the person insists on returning , agent should reply a generic friendly message statting that something like "bura lgga ki aapko return krna padh" something like this and make it more professional
+2- if the customer is saying that the issue was of size, suppose "suit chota hai" agent should offer similiar items they purchased but in a greater price.
+3- if they say they didn't like the color, offer different color of that items or more similiar items to there earlier purchase
