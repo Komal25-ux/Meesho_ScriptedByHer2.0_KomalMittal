@@ -23,6 +23,30 @@ logger = logging.getLogger("sakhi-backend")
 # mode's chat. Namespacing the key by mode isolates them.
 PENDING_LISTINGS: Dict[str, Dict[str, Any]] = {}
 
+# In-memory store for a ProductGrid picker awaiting a selection, keyed exactly
+# like PENDING_LISTINGS/PENDING_RETURNS. Written by run_catalog_agent /
+# run_customer_agent when a vector search turns up 2-4 ambiguous SKU matches
+# (see ProductGrid.jsx), and resolved by check_pending_selection on the next
+# turn - the reseller/customer taps an option, which sends its exact product
+# name back as the next message.
+PENDING_SELECTIONS: Dict[str, Dict[str, Any]] = {}
+
+# In-memory store for the last specific product a customer was grounded on
+# (i.e. the last turn where run_customer_agent's Success Case fired for
+# exactly one item), keyed exactly like the dicts above. This app has no real
+# cross-turn conversation memory - every /chat/send call is a stateless graph
+# invocation - so without this, a natural follow-up confirmation like "isko
+# order kar do" or "ye pack kardo" (which doesn't repeat the product name)
+# has nothing to resolve against: that message's OWN vector search matches
+# loosely against several unrelated catalog items (being a generic phrase
+# with no product-specific words), which used to fall through to the
+# Browsing Case and show a fresh picker - i.e. an infinite "here are some
+# options" loop right when the customer was trying to confirm a purchase.
+# This dict is the minimal fix: remember the one item most recently grounded,
+# so Priority 2 has a real referent for "isko"/"ye"/"yehi" even when this
+# turn's own search can't provide one.
+LAST_VIEWED_PRODUCT: Dict[str, Dict[str, Any]] = {}
+
 def _pending_key(whatsapp_number: str, active_mode: str) -> str:
     return f"{whatsapp_number}::{active_mode}"
 
@@ -276,6 +300,8 @@ class SakhiState(TypedDict):
     pending_route: str
     # Human-in-the-loop Returns Retention routing (transient, not persisted)
     pending_return_route: str
+    # ProductGrid picker routing (transient, not persisted)
+    pending_selection_route: str
 
     # Processing outputs
     reply_text: str
@@ -285,6 +311,11 @@ class SakhiState(TypedDict):
     # by the frontend as a PricePatch stitched below the image instead of an
     # AI-composited price overlay baked into the image itself.
     reply_price: Optional[int]
+    # Up to 4 {name, price, base_image_url} dicts - Python-controlled, never
+    # model-emitted (same image_url fidelity policy as elsewhere in this
+    # file), rendered by the frontend as a ProductGrid picker when a vector
+    # search turns up multiple ambiguous SKU matches.
+    reply_product_options: Optional[List[Dict[str, Any]]]
     # Pure Devanagari version of reply_text for Sarvam TTS (dual-output from
     # the same LLM call as reply_text). Falls back to reply_text at the API
     # layer if a node doesn't set this (e.g. deterministic template replies).
@@ -441,6 +472,64 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
 
 def route_pending(state: SakhiState) -> str:
     return state.get("pending_route", "not_pending")
+
+# ── NODE 1.7: CHECK PENDING PRODUCT SELECTION (ProductGrid picker) ─
+def check_pending_selection(state: SakhiState) -> SakhiState:
+    """If a ProductGrid picker was just shown (catalog or customer ambiguous-
+    match picker - see run_catalog_agent / run_customer_agent), the next
+    message is expected to be one of the displayed product names verbatim,
+    since ProductGrid.jsx's onClick sends the tapped option's exact name.
+    Routing a bare product name through detect_intent's LLM classifier would
+    be a coin flip (no "list"/"return"/etc. verb to key off), so this gate
+    resolves which agent originated the picker deterministically from
+    PENDING_SELECTIONS - the actual product match is then re-resolved by that
+    agent's own exact-name lookup (db_client.get_product_by_name), not here."""
+    t_start = time.time()
+    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
+    active_mode = state.get("active_mode", "reseller")
+    raw_input = state.get("raw_input", "")
+
+    pending_key = _pending_key(whatsapp_number, active_mode)
+    pending = PENDING_SELECTIONS.get(pending_key)
+    if not pending:
+        state["pending_selection_route"] = "not_pending"
+        return state
+
+    selected = next(
+        (o for o in pending.get("options", []) if (o.get("name") or "").strip().lower() == raw_input.strip().lower()),
+        None
+    )
+
+    # Whether resolved or not, the picker is consumed - an unrecognized reply
+    # abandons it and falls through to normal intent detection instead of
+    # silently no-op'ing on a stale selection.
+    PENDING_SELECTIONS.pop(pending_key, None)
+    state["pending_selection_route"] = pending["agent"] if selected else "not_pending"
+
+    latency = int((time.time() - t_start) * 1000)
+    log_event = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent": "Orchestrator",
+        "action": "Pending Product Selection Check",
+        "latency_ms": latency,
+        "data": {
+            "resolved": bool(selected),
+            "route": state["pending_selection_route"],
+            "trigger_text": raw_input
+        }
+    }
+    state["trace_logs"].append(log_event)
+    db_client.log_agent_event({
+        "session_id": whatsapp_number,
+        "event_type": "pending_selection_check",
+        "agent_name": "Orchestrator",
+        "latency_ms": latency,
+        "payload": log_event["data"]
+    })
+    return state
+
+def route_pending_selection(state: SakhiState) -> str:
+    return state.get("pending_selection_route", "not_pending")
 
 _RETURNS_STAGE_LABELS = {
     "A": "SCENARIO A - Hard Return",
@@ -823,23 +912,75 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
 
-    # 1. Generate text embedding using Gemini
-    embedding = []
-    if configure_gemini():
-        try:
-            # Query embedding
-            embed_res = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=user_input,
-                task_type="retrieval_query",
-                output_dimensionality=768
-            )
-            embedding = embed_res['embedding']
-        except Exception as e:
-            logger.error(f"Embedding generation failed in Catalog Agent: {e}")
+    # Exact-name lookup first - this is how a reseller's tap on a ProductGrid
+    # option (see check_pending_selection / ProductGrid.jsx) arrives back
+    # here: the frontend sends the option's exact product name as the next
+    # message. Resolving it deterministically here avoids re-running the
+    # ambiguous vector search below, which could turn up the same cluster of
+    # similarly-named SKUs again and show the picker forever.
+    exact_match = db_client.get_product_by_name(user_input)
 
-    # 2. Query Supabase vector similarity
-    similar_skus = db_client.match_products(embedding, threshold=0.2, limit=1)
+    if exact_match:
+        similar_skus = [exact_match]
+    else:
+        # 1. Generate text embedding using Gemini
+        embedding = []
+        if configure_gemini():
+            try:
+                # Query embedding
+                embed_res = genai.embed_content(
+                    model="models/gemini-embedding-001",
+                    content=user_input,
+                    task_type="retrieval_query",
+                    output_dimensionality=768
+                )
+                embedding = embed_res['embedding']
+            except Exception as e:
+                logger.error(f"Embedding generation failed in Catalog Agent: {e}")
+
+        # 2. Query Supabase vector similarity - up to 4 candidates, since an
+        # ambiguous match now shows a picker instead of silently auto-drafting
+        # whichever the search ranked first.
+        similar_skus = db_client.match_products(embedding, threshold=0.2, limit=4)
+
+    if len(similar_skus) >= 2:
+        # Ambiguous - pause the auto-draft and ask the reseller which SKU they
+        # mean instead. Nothing is written to PENDING_LISTINGS yet; the
+        # selection is resolved by check_pending_selection on the next turn.
+        options = [
+            {
+                "name": p.get("name"),
+                "price": p.get("suggested_selling_price_inr") or (p.get("meesho_cost_inr", 350) + 150),
+                "base_image_url": p.get("base_image_url") or f"https://picsum.photos/seed/{p.get('product_id')}/600/400"
+            }
+            for p in similar_skus[:4]
+        ]
+        PENDING_SELECTIONS[_pending_key(whatsapp_number, active_mode)] = {
+            "agent": "catalog",
+            "options": options,
+        }
+        state["reply_text"] = "Didi, mujhe catalog me kuch milte-julte options mile hain. Kripya bataiye kaunsa item list karna hai:"
+        state["reply_tts_text"] = "दीदी, मुझे कैटलॉग में कुछ मिलते-जुलते ऑप्शन मिले हैं। कृपया बताइये कौनसा आइटम लिस्ट करना है।"
+        state["reply_product_options"] = options
+        state["reply_image_url"] = None
+
+        latency = int((time.time() - t_start) * 1000)
+        log_event = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "agent": "CatalogAgent",
+            "action": "Multiple SKU Matches - Awaiting Selection",
+            "latency_ms": latency,
+            "data": {"matched_catalog_items_count": len(similar_skus)}
+        }
+        state["trace_logs"].append(log_event)
+        db_client.log_agent_event({
+            "session_id": whatsapp_number,
+            "event_type": "catalog_selection_prompt",
+            "agent_name": "CatalogAgent",
+            "latency_ms": latency,
+            "payload": log_event["data"]
+        })
+        return state
 
     matched_product = {}
     selling_price = 0
@@ -1029,39 +1170,84 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
 
-    # 1. Generate text embedding using Gemini
-    embedding = []
-    if configure_gemini():
-        try:
-            embed_res = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=user_input,
-                task_type="retrieval_query",
-                output_dimensionality=768
-            )
-            embedding = embed_res['embedding']
-        except Exception as e:
-            logger.error(f"Embedding generation failed in Customer Agent: {e}")
+    # Exact-name lookup first - this is how a customer's tap on a ProductGrid
+    # option (see check_pending_selection / ProductGrid.jsx) arrives back
+    # here: the frontend sends the option's exact product name as the next
+    # message. Resolved deterministically instead of re-running the ambiguous
+    # vector search below, which could resurface the same cluster of
+    # similarly-named SKUs and show the picker again.
+    exact_match = db_client.get_product_by_name(user_input)
 
-    # 2. Query Supabase vector similarity matching
-    similar_skus = db_client.match_products(embedding, threshold=0.15, limit=2)
-    context_str = "\n".join([
-        f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
-        f"Category: {p.get('category')} | "
-        f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
-        f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
-        f"Material: {p.get('material') or 'Not specified'} | "
-        f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
-        for p in similar_skus
-    ]) if similar_skus else "No matching product found in the catalog for this query."
+    if exact_match:
+        similar_skus = [exact_match]
+    else:
+        # 1. Generate text embedding using Gemini
+        embedding = []
+        if configure_gemini():
+            try:
+                embed_res = genai.embed_content(
+                    model="models/gemini-embedding-001",
+                    content=user_input,
+                    task_type="retrieval_query",
+                    output_dimensionality=768
+                )
+                embedding = embed_res['embedding']
+            except Exception as e:
+                logger.error(f"Embedding generation failed in Customer Agent: {e}")
+
+        # 2. Query Supabase vector similarity matching - up to 4 candidates.
+        # NOTE: ambiguity among these is NOT decided here anymore - see below.
+        # A phrase like "mujhe ye khareedna hai" or "saree wapas karni hai" has
+        # no specific product attributes in it, so a naive match-count check
+        # right here would misfire on generic purchase/return phrases just as
+        # easily as on a genuine multi-SKU product query, hijacking the turn
+        # before Priority 1/2 below ever get a chance to run - that was the
+        # actual cause of the "purchase intent loops back into product
+        # suggestions" bug. Priority 1/2 must always be checked FIRST, via the
+        # same LLM call that would otherwise attempt a grounded answer; only
+        # if none of them apply AND the model itself couldn't confidently
+        # ground an answer do we fall back to showing a picker (further down).
+        similar_skus = db_client.match_products(embedding, threshold=0.15, limit=4)
+
+    def _format_product_line(p: Dict[str, Any]) -> str:
+        return (
+            f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
+            f"Category: {p.get('category')} | "
+            f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
+            f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
+            f"Material: {p.get('material') or 'Not specified'} | "
+            f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
+        )
+
+    context_str = "\n".join(_format_product_line(p) for p in similar_skus) if similar_skus \
+        else "No matching product found in the catalog for this query."
+
+    # Last item this session was actually grounded on (see LAST_VIEWED_PRODUCT
+    # docstring above) - the referent for a bare confirmation like "isko order
+    # kar do" that doesn't repeat the product name, since that phrase's own
+    # vector search below has nothing product-specific to match against.
+    recent_product = LAST_VIEWED_PRODUCT.get(_pending_key(whatsapp_number, active_mode))
+    recent_context_str = _format_product_line(recent_product) if recent_product else "None."
 
     # Single system prompt covering every turn - Priority 1 (Return Retention
-    # Hook) and Priority 2 (Purchase Intent Override) are checked by the model
-    # itself, in sequence, before the strict RAG rules apply. NOTE: image_url
-    # is deliberately NOT part of CustomerAgentResponse (see gemini_utils.py) -
-    # reproducing a CDN URL byte-for-byte in LLM JSON is a real fidelity risk,
-    # so this prompt tells the model to leave image handling to the system
-    # rather than asking it to output a URL it cannot reliably reproduce.
+    # Hook) and Priority 2 (Purchase Confirmation Intent) are checked by the
+    # model itself, in sequence, before the strict RAG rules apply. NOTE:
+    # image_url is deliberately NOT part of CustomerAgentResponse (see
+    # gemini_utils.py) - reproducing a CDN URL byte-for-byte in LLM JSON is a
+    # real fidelity risk, so this prompt tells the model to leave image
+    # handling to the system rather than asking it to output a URL it cannot
+    # reliably reproduce.
+    #
+    # Priority 2 deliberately treats "exactly one product in CONTEXT" as its
+    # proxy for "a specific item is established," not real cross-turn memory -
+    # this app has none (every /chat/send call is a stateless graph
+    # invocation; see PENDING_LISTINGS/PENDING_RETURNS/PENDING_SELECTIONS for
+    # how the few things that DO need turn-to-turn continuity are handled
+    # instead). A generic phrase like "saree leni hai" matches loosely against
+    # several catalog items (ambiguous CONTEXT) just like a genuine purchase
+    # confirmation with no real referent would; the proxy is what lets the
+    # model tell those apart without needing conversation history it doesn't
+    # have.
     customer_prompt = f"""# System Persona & Core Objective
 You are 'Customer Didi', a polite and friendly AI customer support assistant representing a Hindi-speaking Meesho reseller named {reseller_name}. Your primary job is to answer buyer queries regarding product availability, sizes, colors, material, and pricing.
 You must prioritize customer retention, zero-hallucination factual grounding, and professional transaction handoffs.
@@ -1076,15 +1262,35 @@ ui_text: "Oh! Maaf kijiyega ki product aapki ummeedon par khara nahi utra. Kya m
 tts_text: "ओह! माफ़ कीजियेगा की प्रोडक्ट आपकी उम्मीदों पर खरा नहीं उतरा. क्या मैं जान सकती हूँ की इशू क्या है? साइज, कलर या फिटिंग में कोई दिक्कत आयी? मैं तुरंत इसको एक्सचेंज करवा सकती हूँ."
 answered_from_product_context: false
 return_retention_triggered: true
+purchase_intent_detected: false
 
-## Priority 2: Purchase Intent Override
-Trigger: the user expresses a desire to buy, purchase, or order the product (e.g. "mujhe khareedna hai", "order book kar do", "price batao aur pack kar do", "I want to buy this", "ye chahiye mujhe").
-Action: you cannot complete financial transactions. Bypass the RAG context rules below and hand off the order to the human reseller.
+## Priority 2: Purchase Confirmation Intent
+Not every mention of buying is a completed decision - you must strictly separate EXPLORATORY interest from an actual CONFIRMATION. Getting this wrong in either direction is a real bug: treating exploration as confirmation skips showing the customer any products; treating confirmation as exploration loops them back into search when they already decided.
+
+CRITICAL RULE: do NOT set purchase_intent_detected to true if the user is making a general inquiry about a category or type of product (e.g. "saree leni hai", "kurti chahiye", "kuch dikhao", "kya options hain", "mujhe ek achi saree chahiye"). This is EXPLORATORY - no specific item has been pinned down yet, only a desire to be shown some. Skip this priority entirely and fall through to Product Query Handling below, where you retrieve and describe matching products from CONTEXT as usual.
+
+ONLY set purchase_intent_detected to true if BOTH of these hold:
+(a) The wording confirms/finalizes a purchase decision, on one specific already-identified item rather than a category. This does NOT require an explicit pronoun ("isko"/"ye"/"yehi") - a bare confirmation like "order kar do", "pack kar do", or "confirm kar do" with no other product/category mentioned is just as much a confirmation as "ye wali pack kardo", "haan ye done hai", "iska order kardo", "isse le lo", "yehi confirm kardo". The only thing that makes it EXPLORATORY instead (see above) is naming/asking about a category or new item.
+(b) EXACTLY ONE product is established as the referent for words like "isko"/"ye"/"yehi"/"isse". This holds if EITHER: CONTEXT below (this message's own product matches) contains exactly one product; OR CONTEXT is empty/ambiguous but RECENTLY DISCUSSED ITEM below is present AND this message does not itself name or ask about some other specific product or category (a bare confirmation phrase like "isko order kar do" has no product-specific words in it, so its own CONTEXT will usually be empty or noisy - RECENTLY DISCUSSED ITEM is what resolves "isko" in that case). If neither holds, nothing specific has actually been pinned down, so confirming an order is logically impossible no matter how confirmatory the wording sounds - condition (b) fails and purchase_intent_detected MUST stay false.
+
+RECENTLY DISCUSSED ITEM (the last product this customer was specifically shown/answered about, from an earlier message - "None." if nothing yet):
+{recent_context_str}
+
+If (a) holds but (b) fails (confirmatory wording, but CONTEXT does not resolve to exactly one item): do not guess which item they mean and do not hand off an order. Ask for clarification instead.
 You MUST output EXACTLY:
-ui_text: "Ji zaroor! Maine aapki request note kar li hai. Sunita Didi jald hi aapse final order aur payment ke baare mein baat karengi. 🛍️"
-tts_text: "जी ज़रूर! मैंने आपकी रिक्वेस्ट नोट कर ली है. सुनीता दीदी जल्द ही आपसे फाइनल आर्डर और पेमेंट के बारे में बात करेंगी."
+ui_text: "Aap kaunsi wali confirm karna chahte hain?"
+tts_text: "आप कौनसी वाली कन्फर्म करना चाहते हैं?"
 answered_from_product_context: false
 return_retention_triggered: false
+purchase_intent_detected: false
+
+If (a) AND (b) both hold: you cannot complete financial transactions. Do NOT describe or search for the product again. Bypass the RAG context rules below entirely and hand off the order to the human reseller.
+You MUST output EXACTLY:
+ui_text: "Ji zaroor! Aapka order confirm karne ke liye main reseller ko notify kar rahi hoon. Sunita Didi jald hi aapse sampark karengi. 🛍️"
+tts_text: "जी ज़रूर! आपका ऑर्डर कन्फर्म करने के लिए मैं रीसेलर को नोटिफाई कर रही हूँ. सुनीता दीदी जल्द ही आपसे संपर्क करेंगी."
+answered_from_product_context: false
+return_retention_triggered: false
+purchase_intent_detected: true
 
 # Product Query Handling (Strict RAG Rules)
 Only if Priority 1 and Priority 2 above do NOT apply, answer based ONLY on the provided context below.
@@ -1096,8 +1302,9 @@ USER QUERY:
 "{user_input}"
 
 1. Factual Constraints: Do not invent attributes outside CONTEXT. A product appearing in CONTEXT means it EXISTS and IS AVAILABLE - a general availability question ("kya ye milegi?") is answered as long as a matching product is in context; do not treat availability itself as a missing detail.
-2. Success Case (Details Found): Answer warmly. You MUST state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"). Set answered_from_product_context to true and return_retention_triggered to false.
-3. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from context, do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false and return_retention_triggered to false.
+2. Browsing Case (General/Exploratory Query, 2+ Candidates): If the query is a general browsing request rather than a question about one specific, already-identified item (e.g. "saree dikhao", "kuch achi kurti dikhao", "kya options hain") AND CONTEXT lists 2 or more candidate products, do NOT try to describe or compare all of them yourself in ui_text/tts_text - even though you technically could. The system will show them to the customer as a visual picker instead, which they can tap directly; a wall of text listing multiple names/prices is worse UX than that picker and defeats its purpose. In this case ui_text/tts_text can be a brief one-line acknowledgement (it will likely be replaced by the picker anyway). Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false.
+3. Success Case (Single Specific Item): Only when CONTEXT effectively resolves to ONE relevant item (either exactly one product in CONTEXT, or the query clearly asks about one specific item even if a second loosely-related product is also present in CONTEXT) do you answer directly. Answer warmly. You MUST state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"). Set answered_from_product_context to true, return_retention_triggered to false, and purchase_intent_detected to false.
+4. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from context, do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false.
 
 # Phonetic & Formatting Guidelines for TTS
 - Never use currency symbols like '₹' or 'Rs.' - always spell out the number followed by 'रुपये' (e.g. "799 रुपये").
@@ -1107,13 +1314,101 @@ USER QUERY:
 
 # Output
 Image handling is managed entirely by the system based on your answered_from_product_context flag - do not attempt to output an image URL yourself, it is not part of your output schema.
-You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context, return_retention_triggered.
+You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context, return_retention_triggered, purchase_intent_detected.
 """
     result = generate_structured_with_fallback(customer_prompt, CustomerAgentResponse)
     reply_text = result.ui_text if result and result.ui_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL
     reply_tts_text = result.tts_text if result and result.tts_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS
     answered_from_product_context = result.answered_from_product_context if result else False
     return_retention_triggered = result.return_retention_triggered if result else False
+    purchase_intent_detected = result.purchase_intent_detected if result else False
+
+    # Priority 2 fired - stop here. No RAG image, no ambiguous-match picker,
+    # no further product search: the customer already said what they want,
+    # so re-asking or re-suggesting products here is exactly the loop this
+    # branch exists to prevent.
+    if purchase_intent_detected:
+        state["reply_text"] = reply_text
+        state["reply_tts_text"] = reply_tts_text
+        state["reply_image_url"] = None
+        state["reply_product_options"] = None
+
+        # The confirmed item is whichever one resolved condition (b) above -
+        # this message's own single match, or else the carried-over recent
+        # one. Purely for a more useful trace log entry; the confirmation
+        # reply itself is the same mandated string regardless.
+        confirmed_product = similar_skus[0] if len(similar_skus) == 1 else recent_product
+        pending_key = _pending_key(whatsapp_number, active_mode)
+        # Order is placed - clear the remembered item so a stray later
+        # message doesn't "confirm" the same purchase a second time.
+        LAST_VIEWED_PRODUCT.pop(pending_key, None)
+
+        latency = int((time.time() - t_start) * 1000)
+        log_event = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "agent": "CustomerAgent",
+            "action": "order_placed",
+            "latency_ms": latency,
+            "data": {
+                "action": "order_placed",
+                "notified": "reseller",
+                "product_name": confirmed_product.get("name") if confirmed_product else None
+            }
+        }
+        state["trace_logs"].append(log_event)
+        db_client.log_agent_event({
+            "session_id": whatsapp_number,
+            "event_type": "customer_purchase_intent",
+            "agent_name": "CustomerAgent",
+            "latency_ms": latency,
+            "payload": log_event["data"]
+        })
+        return state
+
+    # Ambiguous product query: Priority 1/2 didn't apply, and the model itself
+    # couldn't confidently ground an answer from multiple candidate SKUs -
+    # hand the customer a picker instead of guessing (or refusing) among them.
+    # Checked AFTER the LLM call (unlike the old match-count-only check) so a
+    # generic purchase/return phrase that happens to loosely match several
+    # SKUs never reaches here - Priority 1/2 above already claimed it. (Note:
+    # purchase_intent_detected already returned early above; return_retention_
+    # triggered is guarded here explicitly since it falls through to the
+    # PENDING_RETURNS handoff further below, not an early return.)
+    if not return_retention_triggered and not answered_from_product_context and len(similar_skus) >= 2:
+        options = [
+            {
+                "name": p.get("name"),
+                "price": p.get("suggested_selling_price_inr"),
+                "base_image_url": p.get("base_image_url") or f"https://picsum.photos/seed/{p.get('product_id')}/600/400"
+            }
+            for p in similar_skus[:4]
+        ]
+        PENDING_SELECTIONS[_pending_key(whatsapp_number, active_mode)] = {
+            "agent": "customer",
+            "options": options,
+        }
+        state["reply_text"] = "Ji, mujhe kuch milte-julte options mile hain. Kripya bataiye aapko kis item ke baare mein jaanna hai:"
+        state["reply_tts_text"] = "जी, मुझे कुछ मिलते-जुलते ऑप्शन मिले हैं। कृपया बताइये आपको किस आइटम के बारे में जानना है।"
+        state["reply_product_options"] = options
+        state["reply_image_url"] = None
+
+        latency = int((time.time() - t_start) * 1000)
+        log_event = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "agent": "CustomerAgent",
+            "action": "Multiple SKU Matches - Awaiting Selection",
+            "latency_ms": latency,
+            "data": {"matched_catalog_items_count": len(similar_skus)}
+        }
+        state["trace_logs"].append(log_event)
+        db_client.log_agent_event({
+            "session_id": whatsapp_number,
+            "event_type": "customer_selection_prompt",
+            "agent_name": "CustomerAgent",
+            "latency_ms": latency,
+            "payload": log_event["data"]
+        })
+        return state
 
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
@@ -1129,6 +1424,11 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         if answered_from_product_context and similar_skus
         else None
     )
+
+    # Remember this as the item a future bare confirmation ("isko order kar
+    # do") should resolve to - see LAST_VIEWED_PRODUCT docstring above.
+    if answered_from_product_context and similar_skus:
+        LAST_VIEWED_PRODUCT[_pending_key(whatsapp_number, active_mode)] = similar_skus[0]
 
     # TASK 2 - Returns Handoff: if the Return Retention Hook fired this turn,
     # seed the same PENDING_RETURNS state the system webhook uses (see
@@ -1381,6 +1681,7 @@ def get_sakhi_agent_graph():
     builder.add_node("load_memory", load_memory)
     builder.add_node("check_pending_return", check_pending_return)
     builder.add_node("check_pending_approval", check_pending_approval)
+    builder.add_node("check_pending_selection", check_pending_selection)
     builder.add_node("detect_intent", detect_intent)
     builder.add_node("catalog_agent", run_catalog_agent)
     builder.add_node("finalize_catalog_listing", finalize_catalog_listing)
@@ -1419,6 +1720,19 @@ def get_sakhi_agent_graph():
             "finalize": "finalize_catalog_listing",
             "still_pending": "assemble_reply",
             "price_updated": "assemble_reply",
+            "not_pending": "check_pending_selection"
+        }
+    )
+
+    # Human-in-the-loop gate: a turn replying to a just-shown ProductGrid
+    # picker is resolved here deterministically (see check_pending_selection's
+    # docstring for why this can't just be left to detect_intent's classifier).
+    builder.add_conditional_edges(
+        "check_pending_selection",
+        route_pending_selection,
+        {
+            "catalog": "catalog_agent",
+            "customer": "customer_agent",
             "not_pending": "detect_intent"
         }
     )

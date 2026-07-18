@@ -259,11 +259,14 @@ export default function App() {
     }
   };
 
-  // Text message send handler
-  const handleSendMessage = async () => {
-    if (!textInput.trim() || isLoading) return;
-    const msg = textInput;
-    setTextInput('');
+  // Text message send handler. Accepts an optional overrideText so a
+  // ProductGrid tap (see handleSelectProduct) can send an exact product name
+  // as if the user had typed and sent it themselves, without touching the
+  // textInput box.
+  const handleSendMessage = async (overrideText) => {
+    const msg = (overrideText ?? textInput).trim();
+    if (!msg || isLoading) return;
+    if (overrideText === undefined) setTextInput('');
     setIsLoading(true);
 
     // Optimistic user bubble update
@@ -284,6 +287,7 @@ export default function App() {
         audio: data.audio,
         image_url: data.image_url,
         price: data.price,
+        product_options: data.product_options,
         voice_fallback: data.voice_fallback
       }]);
       broadcastListingToCustomers(data);
@@ -329,6 +333,7 @@ export default function App() {
           audio: data.audio,
           image_url: data.image_url,
           price: data.price,
+          product_options: data.product_options,
           voice_fallback: data.voice_fallback
         }];
       });
@@ -481,7 +486,7 @@ export default function App() {
           {/* Scrollable messages zone */}
           <div className="flex-1 p-4 overflow-y-auto bg-slate-50 space-y-4">
             {currentMessages.map((msg, index) => (
-              <MessageBubble key={index} message={msg} />
+              <MessageBubble key={index} message={msg} onSelectProduct={handleSendMessage} />
             ))}
             <div ref={chatEndRef} />
           </div>
@@ -501,7 +506,7 @@ export default function App() {
               className="flex-1 rounded-lg border border-meesho-dark bg-meesho-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-meesho-jamuni placeholder:text-gray-400"
             />
             <button
-              onClick={handleSendMessage}
+              onClick={() => handleSendMessage()}
               disabled={isLoading || !textInput.trim()}
               className="bg-meesho-jamuni text-meesho-white border border-meesho-dark p-2.5 rounded-lg transition active:translate-y-[1px] hover:bg-opacity-90 disabled:opacity-50"
             >

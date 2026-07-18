@@ -103,10 +103,12 @@ async def chat_send(
             "intent_confidence": 0.0,
             "pending_route": "",
             "pending_return_route": "",
+            "pending_selection_route": "",
             "reply_text": "",
             "reply_audio_b64": None,
             "reply_image_url": None,
             "reply_price": None,
+            "reply_product_options": None,
             "reply_tts_text": None,
             "listing_finalized": False,
             "listing_broadcast_caption": None,
@@ -127,6 +129,7 @@ async def chat_send(
         reply_text = result.get("reply_text", "Didi, technical error ke vajah se main samajh nahi payi.")
         reply_image_url = result.get("reply_image_url", None)
         reply_price = result.get("reply_price", None)
+        reply_product_options = result.get("reply_product_options", None)
 
         # 5. Synthesize TTS Speech (Text-to-Speech)
         # Agents emit a Devanagari "tts_text" alongside the Hinglish "ui_text"
@@ -159,6 +162,7 @@ async def chat_send(
             "audio": audio_b64,
             "image_url": reply_image_url,
             "price": reply_price,
+            "product_options": reply_product_options,
             "voice_fallback": voice_fallback,
             "listing_finalized": bool(result.get("listing_finalized")),
             "broadcast_caption": result.get("listing_broadcast_caption"),

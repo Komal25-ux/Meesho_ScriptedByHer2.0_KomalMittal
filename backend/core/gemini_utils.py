@@ -66,6 +66,18 @@ class CustomerAgentResponse(AgentResponse):
         "False for every other case. This is read by the orchestrator to hand the conversation off to the "
         "Returns Agent for the customer's next reply - it is not just a descriptive label."
     ))
+    purchase_intent_detected: bool = Field(description=(
+        "True ONLY if the customer's wording confirms/finalizes a purchase decision on one specific, "
+        "already-identified item (e.g. 'ye wali pack kardo', 'iska order kardo') AND the product context "
+        "given to you resolves to exactly one product. False for a general/category-level desire to buy or "
+        "browse (e.g. 'saree leni hai', 'kurti chahiye') - that is exploratory, not confirmation, and must "
+        "fall through to a normal product answer instead. Also False if the wording sounds confirmatory but "
+        "no single specific item can be identified from context - ask which item they mean instead of "
+        "guessing. Read by the orchestrator to stop immediately with the reseller-notified confirmation, "
+        "bypassing any further product search. NOTE: do not add a Python-side default here - Gemini's "
+        "response_schema conversion rejects Pydantic Field 'default' metadata outright ('Unknown field for "
+        "Schema: default'), which silently fails every model in the fallback chain and returns None."
+    ))
 
 class ReturnsAgentResponse(AgentResponse):
     """Returns-agent-specific dual output. Whitelist Condition 3 for images:

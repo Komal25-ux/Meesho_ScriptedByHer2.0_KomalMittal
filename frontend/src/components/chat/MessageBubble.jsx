@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Volume2, VolumeX, Sparkles } from 'lucide-react';
 import PricePatch from './PricePatch';
+import ProductGrid from './ProductGrid';
 
-export default function MessageBubble({ message }) {
-  const { role, text, audio, image_url, price, voice_fallback } = message;
+export default function MessageBubble({ message, onSelectProduct }) {
+  const { role, text, audio, image_url, price, product_options, voice_fallback } = message;
   const isUser = role === 'user';
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioObj, setAudioObj] = useState(null);
@@ -66,9 +67,11 @@ export default function MessageBubble({ message }) {
 
         {/* Optional Image from Catalog agent - price is now rendered as a
             separate stitched patch below, instead of being baked into the
-            image via AI generation. */}
+            image via AI generation. Capped to 65% of the bubble width (a
+            ~35% reduction from the old full-width image) to cut scroll
+            fatigue, left-aligned by default since it's a plain block child. */}
         {image_url && (
-          <div className="mt-3 rounded-lg overflow-hidden border border-meesho-dark bg-meesho-white">
+          <div className="mt-3 max-w-[65%] rounded-[0.5rem] overflow-hidden border border-meesho-dark shadow-tactile bg-meesho-white">
             <img src={image_url} alt="Product Creative" className="w-full h-auto object-cover" />
           </div>
         )}
@@ -77,6 +80,13 @@ export default function MessageBubble({ message }) {
           <div className="mt-2">
             <PricePatch price={price} />
           </div>
+        )}
+
+        {/* 2-4 ambiguous SKU matches - tapping one sends its exact name back
+            as the next message (see App.jsx / orchestrator.py's
+            check_pending_selection). */}
+        {product_options && product_options.length > 0 && (
+          <ProductGrid products={product_options} onSelect={onSelectProduct} />
         )}
 
         {/* Audio Player Control */}

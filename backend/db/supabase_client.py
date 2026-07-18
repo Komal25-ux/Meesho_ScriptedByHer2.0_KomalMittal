@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 from supabase import create_client, Client
 from backend.config import settings
 
@@ -216,6 +217,27 @@ class SupabaseDB:
             self.client.table("agent_events").insert(event_data).execute()
         except Exception as e:
             logger.error(f"Error in log_agent_event: {e}")
+
+    def get_product_by_name(self, product_name: str) -> Optional[dict]:
+        """Exact (case-insensitive) name lookup. Used to resolve a reseller's/
+        customer's tap on a ProductGrid option deterministically - the frontend
+        sends the option's exact name back as the next message (see
+        check_pending_selection / run_catalog_agent / run_customer_agent in
+        orchestrator.py) - instead of re-running an ambiguous vector search
+        that could resurface the same cluster of similarly-named SKUs."""
+        if not product_name:
+            return None
+        if self.is_mock():
+            for p in self.match_products([], limit=10):
+                if p.get("name", "").strip().lower() == product_name.strip().lower():
+                    return p
+            return None
+        try:
+            res = self.client.table("product_embeddings").select("*").ilike("name", product_name.strip()).limit(1).execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            logger.error(f"Error in get_product_by_name: {e}")
+            return None
 
     def match_products(self, query_embedding: list, threshold: float = 0.3, limit: int = 3) -> list:
         """Semantic search over the product vector catalog in Supabase."""
