@@ -459,7 +459,7 @@ export default function App() {
             {activeMode === 'reseller' ? (
               <>
                 <button
-                  onClick={() => triggerDemo("yellow chanderi saree list kardo")}
+                  onClick={() => triggerDemo("saree list krdo")}
                   className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
                 >
                   Catalog List
@@ -474,7 +474,7 @@ export default function App() {
             ) : (
               <>
                 <button
-                  onClick={() => triggerDemo("kya ye kurti large size me hai?")}
+                  onClick={() => triggerDemo("laal saree dikha do")}
                   className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
                 >
                   Customer Qs
