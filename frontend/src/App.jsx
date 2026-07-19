@@ -617,7 +617,7 @@ export default function App() {
                   : 'bg-meesho-white text-meesho-dark hover:bg-meesho-light'
               }`}
             >
-              Reseller's Catalog
+              Catalog
             </button>
           </div>
 
