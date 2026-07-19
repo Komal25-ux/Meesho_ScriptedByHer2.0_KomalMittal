@@ -21,7 +21,7 @@ Once exactly one product is resolved:
 - `cost` = `meesho_cost_inr`; `selling_price` = `suggested_selling_price_inr` (falls back to `cost + 150` if absent), overridden by any digit found in the user's message above `cost`.
 - `generate_whatsapp_caption` (the one LLM call - see §5) writes the promotional post.
 - The draft is held in `PENDING_LISTINGS` (keyed by whatsapp_number + active_mode) - **nothing is saved or posted yet**. The reseller must explicitly approve, modify the price, or abandon it; `check_pending_approval` classifies which of those the next message is (LLM-classified, not keyword-matched, since "kar do" alone is ambiguous between approval/price-edit/new-request).
-- Approval → `finalize_catalog_listing` saves the listing and broadcasts it into the Customer segment's chat.
+- Approval → `finalize_catalog_listing` saves the listing and broadcasts it into the Customer segment's chat. It also seeds that customer session's `LAST_VIEWED_PRODUCT` (see `prompt_customer_agent.md`'s RECENTLY DISCUSSED ITEM section) with the just-posted product - `App.jsx`'s broadcast is purely a cosmetic frontend chat bubble, so without this the Customer Agent has no idea the customer has "seen" the item, and a bare purchase confirmation right after the post (*"ye lena hai"*) would fall through to an ambiguous-match picker instead of confirming the order.
 
 ## 4. CRITICAL RULE FOR SHARING (Product Card Click, Reseller Mode)
 

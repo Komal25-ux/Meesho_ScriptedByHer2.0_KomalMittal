@@ -1225,6 +1225,10 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "matched_product_description": matched_product.get("description", ""),
             "selling_price": selling_price,
             "cost": cost,
+            # Full product dict, kept for finalize_catalog_listing to seed the
+            # CUSTOMER segment's LAST_VIEWED_PRODUCT once this listing actually
+            # goes live - see the comment there for why this is necessary.
+            "matched_product": matched_product,
         }
 
         if is_share_trigger:
@@ -1345,6 +1349,27 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     state["listing_finalized"] = True
     state["listing_broadcast_caption"] = listing_payload["whatsapp_caption"]
     state["listing_broadcast_caption_tts"] = pending.get("whatsapp_caption_tts", listing_payload["whatsapp_caption"])
+
+    # Seed the CUSTOMER segment's RECENTLY DISCUSSED ITEM (LAST_VIEWED_PRODUCT)
+    # with the product that was just posted - broadcastListingToCustomers in
+    # App.jsx only inserts a cosmetic chat bubble on the frontend, it never
+    # tells the backend a customer has now seen this item. Without this, a
+    # customer replying "ye lena hai"/"order kar do" right after the post has
+    # no CONTEXT of their own (that phrase has no product-specific words) and
+    # no RECENTLY DISCUSSED ITEM either, so Priority 2's condition (b) in
+    # run_customer_agent fails and the message falls through to the ambiguous-
+    # match picker instead of confirming the order - exactly the "shows more
+    # options instead of understanding purchase intent" bug this fixes.
+    # suggested_selling_price_inr is overridden to the actual price posted
+    # (selling_price), which may differ from the catalog default if the
+    # reseller negotiated a custom price before approving.
+    matched_product = pending.get("matched_product")
+    if matched_product:
+        customer_session_key = _pending_key(whatsapp_number, "customer")
+        LAST_VIEWED_PRODUCT[customer_session_key] = {
+            **matched_product,
+            "suggested_selling_price_inr": pending["selling_price"],
+        }
 
     latency = int((time.time() - t_start) * 1000)
     log_event = {
