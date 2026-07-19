@@ -1643,10 +1643,11 @@ CONTEXT:
 USER QUERY:
 "{user_input}"
 
-1. Factual Constraints: Do not invent attributes outside CONTEXT. A product appearing in CONTEXT means it EXISTS and IS AVAILABLE - a general availability question ("kya ye milegi?") is answered as long as a matching product is in context; do not treat availability itself as a missing detail.
-2. Browsing Case (General/Exploratory Query, 2+ Candidates): If the query is a general browsing request rather than a question about one specific, already-identified item (e.g. "saree dikhao", "kuch achi kurti dikhao", "kya options hain") AND CONTEXT lists 2 or more candidate products, do NOT try to describe or compare all of them yourself in ui_text/tts_text - even though you technically could. The system will show them to the customer as a visual picker instead, which they can tap directly; a wall of text listing multiple names/prices is worse UX than that picker and defeats its purpose. In this case ui_text/tts_text can be a brief one-line acknowledgement (it will likely be replaced by the picker anyway). Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false.
+1. Factual Constraints: Do not invent attributes outside CONTEXT or RECENTLY DISCUSSED ITEM (whichever grounds the answer per the rules below). A product appearing there means it EXISTS and IS AVAILABLE - a general availability question ("kya ye milegi?") is answered as long as a matching product is available; do not treat availability itself as a missing detail.
+2. Browsing Case (General/Exploratory Query, 2+ Candidates): If the query is a general browsing request rather than a question about one specific, already-identified item (e.g. "saree dikhao", "kuch achi kurti dikhao", "kya options hain") AND CONTEXT lists 2 or more candidate products, do NOT try to describe or compare all of them yourself in ui_text/tts_text - even though you technically could. The system will show them to the customer as a visual picker instead, which they can tap directly; a wall of text listing multiple names/prices is worse UX than that picker and defeats its purpose. In this case ui_text/tts_text can be a brief one-line acknowledgement (it will likely be replaced by the picker anyway). Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false. This does NOT apply when rule 3b below resolves the query to RECENTLY DISCUSSED ITEM instead - a pronoun referring to a known item is never a fresh browsing request, no matter how many loose/unrelated matches this message's own CONTEXT happens to contain.
 3. Success Case (Single Specific Item): Only when CONTEXT effectively resolves to ONE relevant item (either exactly one product in CONTEXT, or the query clearly asks about one specific item even if a second loosely-related product is also present in CONTEXT) do you answer directly. Answer warmly. You MUST state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"). Set answered_from_product_context to true, return_retention_triggered to false, and purchase_intent_detected to false.
-4. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from context, do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false.
+3b. Pronoun Fallback to Recently Discussed Item: The query may refer to a product using only a pronoun/demonstrative and no product-specific words at all (e.g. "iska size kya hai?", "ismein aur colors hain?", "is it available in blue?", "what sizes are available in this?"). A query like that has nothing for its own CONTEXT above to match against, so CONTEXT will usually be empty or a noisy, unrelated set of loose matches - the same situation Priority 2's condition (b) above already handles for purchase confirmations. Apply the identical resolution here: if RECENTLY DISCUSSED ITEM above is present (it says "None." when it is not), treat IT as the grounding item for this Success Case and answer from its attributes, instead of falling through to the Browsing Case or refusing for lack of context. Do NOT trigger a broad catalog search or picker just because this message's own CONTEXT was empty/ambiguous - a known pronoun referring to an already-shared/posted item always takes priority over that. This only applies while the pronoun genuinely points at RECENTLY DISCUSSED ITEM; if the query names a different/new product or category, resolve normally instead.
+4. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from both CONTEXT and RECENTLY DISCUSSED ITEM (whichever grounded the answer), do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false.
 
 # Phonetic & Formatting Guidelines for TTS
 - Never use currency symbols like '₹' or 'Rs.' - always spell out the number followed by 'रुपये' (e.g. "799 रुपये").
@@ -1771,6 +1772,13 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
 
+    # Whichever item actually grounded the answer - this message's own single
+    # match, or (rule 3b above) the carried-over RECENTLY DISCUSSED ITEM when
+    # a pronoun-only query ("iska size kya hai?") left similar_skus empty/
+    # noisy. Mirrors the same fallback Priority 2 already uses for
+    # confirmed_product above.
+    grounding_product = similar_skus[0] if similar_skus else recent_product
+
     # Whitelist Condition 2: only attach the product photo when the agent
     # actually answered a grounded product question from context. Default is
     # no image; every other case - fallback/apology, Purchase Handoff, Return
@@ -1778,15 +1786,15 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     # individually enumerated. Gated on the model's own explicit flag rather
     # than the real base_image_url ever passing through the model itself.
     state["reply_image_url"] = (
-        similar_skus[0].get("base_image_url")
-        if answered_from_product_context and similar_skus
+        grounding_product.get("base_image_url")
+        if answered_from_product_context and grounding_product
         else None
     )
 
     # Remember this as the item a future bare confirmation ("isko order kar
     # do") should resolve to - see LAST_VIEWED_PRODUCT docstring above.
-    if answered_from_product_context and similar_skus:
-        LAST_VIEWED_PRODUCT[_pending_key(whatsapp_number, active_mode)] = similar_skus[0]
+    if answered_from_product_context and grounding_product:
+        LAST_VIEWED_PRODUCT[_pending_key(whatsapp_number, active_mode)] = grounding_product
 
     # TASK 2 - Returns Handoff: if the Return Retention Hook fired this turn,
     # seed the same PENDING_RETURNS state the system webhook uses (see
@@ -1915,7 +1923,7 @@ Communication Rules:
 1. Language: Use friendly, professional Hinglish (Hindi written in the English alphabet).
 2. Tone: Encouraging, analytical, and actionable. Address the reseller as "Didi" or "{reseller_name} ji".
 3. Structure: Always use emojis and bullet points for readability.
-4. Number Formatting (for correct audio pronunciation): When writing large numbers (revenue, profit, item counts), always use standard comma formatting - e.g. write "54,090", never the raw unformatted "54090". The DATA SUMMARY above already gives you comma-formatted numbers; copy them exactly as-is rather than removing the commas. This applies in both ui_text and tts_text - a TTS engine reads "54,090" as "fifty-four thousand ninety" but reads unformatted "54090" digit-by-digit ("five-four-zero-nine-zero"), which sounds broken to the reseller.
+4. Number Formatting (ui_text only): When writing large numbers (revenue, profit, item counts) in ui_text, always use standard comma formatting - e.g. write "54,090", never the raw unformatted "54090". The DATA SUMMARY above already gives you comma-formatted numbers; copy them exactly as-is rather than removing the commas. tts_text follows its own, different number rule instead - see Rule 3 under STRICT TTS CONSTRAINTS below (numbers spelled out fully in Devanagari words, no digits at all).
 
 Required Report Structure:
 1. Greeting & Timeframe: Acknowledge the requested time period ({metrics['days']} din).
@@ -1942,8 +1950,19 @@ Example Output (for illustration of tone/structure only - use the real numbers f
 
 Kya aap kisi specific category ke baare mein aur details janna chahti hain?"
 
-You must output your response using the provided JSON schema. ui_text must be written in Hinglish following the structure above. tts_text must be a direct, word-for-word translation of that exact message into pure Devanagari script.
-In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799", or "54,090 रुपये" instead of "₹54090" - keep the comma from the number, do not remove it). No markdown formatting (*, _, #) or emojis in tts_text - Devanagari and basic punctuation only.
+# STRICT TTS CONSTRAINTS (tts_text)
+You are speaking this analysis out loud to the reseller. You must provide a complete, valuable business analysis, but it MUST be highly compressed - this is a SEPARATE, SHORTER piece of writing from ui_text above, not a translation of it. ui_text stays the full, detailed report (markdown, emojis, bullet points, all 4 sections of the Required Report Structure); tts_text is a standalone 3-sentence spoken summary.
+
+Rule 1 - The "Three-Sentence" Architecture: tts_text is strictly limited to a maximum of 3 short sentences, in exactly this structure, so a complete analysis is delivered quickly:
+- Sentence 1 (The Metric): State the single most important growth number from DATA SUMMARY (e.g. "Sunita ji, is hafte aapki sales biis pratishat badhi hai!").
+- Sentence 2 (The Insight): Explain *why* it happened, grounded only in DATA SUMMARY's top-selling item/category (e.g. "Ye growth sabse zyada cotton saree ki demand ki wajah se hui.").
+- Sentence 3 (The Action): Suggest one quick next step, drawn from the same advice given in ui_text (e.g. "Humein aur naye summer designs list karne chahiye.").
+
+Rule 2 - The "One-Breath" Limit: the entire tts_text must be readable in a single breath - under 40 words total. Never use long or complex explanations. Keep it punchy and direct.
+
+Rule 3 - Devanagari Purity: tts_text must be 100% Devanagari script. NO English letters, NO Latin digits, NO emojis, and NO markdown formatting (*, _, #) whatsoever. Spell out every number and percentage in words (e.g. "बीस प्रतिशत", not "20%"; "चौवन हज़ार नब्बे रुपये", not "54,090 रुपये" or "₹54,090"). Never write "AI Sakhi" - always spell it phonetically as "ए आई सखी".
+
+You must output your response using the provided JSON schema: ui_text (full Hinglish report per the Required Report Structure above) and tts_text (the separate, compressed 3-sentence Devanagari summary per the STRICT TTS CONSTRAINTS above).
 """
     result = generate_structured_with_fallback(growth_prompt, AgentResponse)
     reply_text = result.ui_text if result else ""
