@@ -9,21 +9,79 @@ from backend.core.gemini_utils import generate_with_fallback
 
 logger = logging.getLogger("sakhi-backend")
 
-# Sarvam Bulbul TTS mispronounces/garbles emoji glyphs and tries to read markdown
-# formatting characters aloud, and reads "\u20B9" unreliably. Rather than blacklist
-# each offending category separately, whitelist what's actually safe to speak:
-# Latin alphanumerics, the Devanagari block (incl. its own punctuation, danda
-# "\u0964" and double-danda "\u0965"), spaces, and basic sentence punctuation. Currency
-# is normalized to spoken words first, since "\u20B9" itself falls outside the
-# whitelist and would otherwise just vanish instead of being read as "rupaye".
+_TRANSLITERATION_MAP = {
+    r"\btotal\b": "टोटल",
+    r"\brevenue\b": "रेवेन्यू",
+    r"\bprofit\b": "प्रॉफिट",
+    r"\bsales\b": "सेल्स",
+    r"\breport\b": "रिपोर्ट",
+    r"\bstar\b": "स्टार",
+    r"\bperformers\b": "परफॉर्मर्स",
+    r"\bperformer\b": "परफॉर्मर",
+    r"\bsarees\b": "साड़ियां",
+    r"\bsaree\b": "साड़ी",
+    r"\bkurtis\b": "कुर्तियां",
+    r"\bkurti\b": "कुर्ती",
+    r"\bsuits\b": "सूट",
+    r"\bsuit\b": "सूट",
+    r"\btops\b": "टॉप",
+    r"\btop\b": "टॉप",
+    r"\blehengas\b": "लहंगे",
+    r"\blehenga\b": "लहंगा",
+    r"\bdresses\b": "ड्रेस",
+    r"\bdress\b": "ड्रेस",
+    r"\bwhatsapp\b": "व्हाट्सएप",
+    r"\bstatus\b": "स्टेटस",
+    r"\bcombos\b": "कॉम्बो",
+    r"\bcombo\b": "कॉम्बो",
+    r"\bbusiness\b": "बिज़नेस",
+    r"\banalysis\b": "एनालिसिस",
+    r"\btips\b": "टिप्स",
+    r"\btip\b": "टिप",
+    r"\bactive\b": "एक्टिव",
+    r"\bmode\b": "मोड",
+    r"\bcustomer\b": "कस्टमर",
+    r"\bagent\b": "एजेंट",
+    r"\bcatalog\b": "कैटलॉग",
+    r"\bgrowth\b": "ग्रोथ",
+    r"\breturn\b": "रिटर्न",
+    r"\brefund\b": "रिफंड",
+    r"\bexchange\b": "एक्सचेंज",
+    r"\border\b": "ऑर्डर",
+    r"\borders\b": "ऑर्डर",
+    r"\bprice\b": "प्राइस",
+    r"\bdelivery\b": "डिलीवरी",
+    r"\bcod\b": "सीओडी",
+    r"\bstock\b": "स्टॉक",
+    r"\bmargin\b": "मार्जिन",
+    r"\bmargins\b": "मार्जिन",
+    r"\bsunita\b": "सुनीता",
+    r"\bdidi\b": "दीदी",
+    r"\bsuneeta\b": "सुनीता",
+    r"\bsakhi\b": "सखी",
+    r"\bai\b": "एआई",
+}
+
+_TRANSLITERATION_RULES = [
+    (re.compile(pattern, re.IGNORECASE), replacement)
+    for pattern, replacement in _TRANSLITERATION_MAP.items()
+]
+
 _RUPEE_PATTERN = re.compile(r"\u20B9\s?(\d[\d,]*)")
 _TTS_WHITELIST_PATTERN = re.compile(r"[^a-zA-Z0-9\u0900-\u097F\u0964\u0965 ,.?!]")
 
 def sanitize_for_tts(text: str) -> str:
-    # Keep the digit group's own commas (Sarvam reads "54,090" as a whole
-    # number naturally; stripping them here would leave raw "54090" digits,
-    # which Sarvam reads one-by-one instead - see prompt_growth_agent.md).
+    # 1. Normalize currency
     text = _RUPEE_PATTERN.sub(lambda m: f"{m.group(1)} \u0930\u0941\u092A\u092F\u0947", text)
+    
+    # 2. Transliterate common English words to Devanagari
+    for pattern, replacement in _TRANSLITERATION_RULES:
+        text = pattern.sub(replacement, text)
+        
+    # 3. Strip any remaining English/Latin letters to prevent Sarvam failures
+    text = re.sub(r"[a-zA-Z]", "", text)
+    
+    # 4. Whitelist only Devanagari characters, digits, spaces, and punctuation
     text = _TTS_WHITELIST_PATTERN.sub(" ", text)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
