@@ -485,50 +485,57 @@ export default function App() {
             </button>
           </div>
 
-          {/* Quick Uses Shortcuts Panel (mode-conditional) */}
-          <div className="bg-meesho-light p-2.5 border-b border-meesho-dark flex items-center space-x-2 overflow-x-auto text-[11px]">
-            <span className="font-bold text-meesho-dark whitespace-nowrap">Uses:</span>
-            {activeMode === 'reseller' ? (
-              <>
-                <button
-                  onClick={() => triggerDemo("saree list krdo")}
-                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-                >
-                  Catalog List
-                </button>
-                <button
-                  onClick={() => triggerDemo("weekly analysis dikhao")}
-                  className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
-                >
-                  Growth Agent
-                </button>
-
-                {/* Cross-segment navigation: switches the right dashboard
-                    panel's active tab without sending a chat message. */}
-                <div className="flex items-center space-x-2 ml-auto">
+          {/* Quick Uses Shortcuts Panel (mode-conditional). Two explicit flex
+              groups + justify-between (rather than ml-auto on the nav-button
+              group) - space-x-*'s generated `margin-left` selector and a
+              plain ml-auto class have colliding specificity in Tailwind, so
+              ml-auto wasn't reliably winning and the nav buttons sat short
+              of the right edge instead of flush against it. */}
+          <div className="bg-meesho-light p-2.5 border-b border-meesho-dark flex items-center justify-between overflow-x-auto text-[11px] gap-2">
+            <div className="flex items-center space-x-2 shrink-0">
+              <span className="font-bold text-meesho-dark whitespace-nowrap">Uses:</span>
+              {activeMode === 'reseller' ? (
+                <>
                   <button
-                    onClick={() => { setActiveTab('sales'); setViewMode('trace'); }}
-                    className="border-[1.5px] border-gray-300 text-[#1E1E24] hover:bg-[#F7F7FA] rounded-[0.5rem] px-3 py-1.5 text-xs font-['Roboto_Slab',_serif] font-medium whitespace-nowrap transition"
+                    onClick={() => triggerDemo("saree list krdo")}
+                    className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
                   >
-                    📊 View Growth
+                    Catalog List
                   </button>
                   <button
-                    onClick={() => { setActiveTab('catalog'); setViewMode('trace'); }}
-                    className="border-[1.5px] border-gray-300 text-[#1E1E24] hover:bg-[#F7F7FA] rounded-[0.5rem] px-3 py-1.5 text-xs font-['Roboto_Slab',_serif] font-medium whitespace-nowrap transition"
+                    onClick={() => triggerDemo("weekly analysis dikhao")}
+                    className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
                   >
-                    📦 Reseller's Catalog
+                    Growth Agent
                   </button>
-                </div>
-              </>
-            ) : (
-              <>
+                </>
+              ) : (
                 <button
                   onClick={() => triggerDemo("laal saree dikha do")}
                   className="bg-meesho-white border border-meesho-dark px-2.5 py-1 rounded-full whitespace-nowrap hover:bg-meesho-aam hover:text-white"
                 >
                   Customer Qs
                 </button>
-              </>
+              )}
+            </div>
+
+            {/* Cross-segment navigation: switches the right dashboard
+                panel's active tab without sending a chat message. */}
+            {activeMode === 'reseller' && (
+              <div className="flex items-center space-x-2 shrink-0">
+                <button
+                  onClick={() => { setActiveTab('sales'); setViewMode('trace'); }}
+                  className="border-[1.5px] border-gray-300 text-[#1E1E24] hover:bg-[#F7F7FA] rounded-[0.5rem] px-3 py-1.5 text-xs font-['Roboto_Slab',_serif] font-medium whitespace-nowrap transition"
+                >
+                  📊 View Growth
+                </button>
+                <button
+                  onClick={() => { setActiveTab('catalog'); setViewMode('trace'); }}
+                  className="border-[1.5px] border-gray-300 text-[#1E1E24] hover:bg-[#F7F7FA] rounded-[0.5rem] px-3 py-1.5 text-xs font-['Roboto_Slab',_serif] font-medium whitespace-nowrap transition"
+                >
+                  📦 Catalog
+                </button>
+              </div>
             )}
           </div>
 

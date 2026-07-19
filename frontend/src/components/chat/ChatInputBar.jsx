@@ -67,7 +67,7 @@ export default function ChatInputBar({ textInput, setTextInput, onSendMessage, o
       {isRecording && (
         <div className="flex items-center space-x-2 px-3 pt-2 text-xs font-mono text-meesho-dark">
           <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
-          <span>Sunita Didi, bolte rahiye...</span>
+          <span>Sakhi sun rhi hai...</span>
         </div>
       )}
       <div className="p-3 flex items-center space-x-2">
@@ -82,7 +82,16 @@ export default function ChatInputBar({ textInput, setTextInput, onSendMessage, o
             className="w-full rounded-lg border border-meesho-dark bg-meesho-white px-3 py-2 pr-9 text-sm focus:outline-none focus:ring-1 focus:ring-meesho-jamuni placeholder:text-gray-400 disabled:opacity-60"
           />
           {isLoading && (
-            <Loader2 className="w-4 h-4 animate-spin text-meesho-jamuni absolute right-3 top-1/2 -translate-y-1/2" />
+            // The rotate-only animate-spin transform and the translate-only
+            // -translate-y-1/2 positioning MUST live on different elements -
+            // Tailwind's animate-spin keyframe sets `transform: rotate(...)`
+            // directly rather than composing through the shared --tw-* custom
+            // properties static transform utilities use, so putting both on
+            // one element makes the animation clobber the vertical-centering
+            // translate every frame, reading as a vertical jitter/bounce.
+            <div className="w-4 h-4 flex items-center justify-center absolute right-3 top-1/2 -translate-y-1/2">
+              <Loader2 className="w-4 h-4 animate-spin text-meesho-jamuni" />
+            </div>
           )}
         </div>
         <button

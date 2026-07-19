@@ -220,7 +220,7 @@ export default function GrowthDashboard() {
               {metric === 'sales' ? (
                 <>
                   <Area type="monotone" dataKey="sales" name="Sales (₹)" stroke="#9F2089" fillOpacity={1} fill="url(#colorSales)" />
-                  <Area type="monotone" dataKey="profit" name="Margin (₹)" stroke="#42BC9E" fillOpacity={1} fill="url(#colorProfit)" />
+                  <Area type="monotone" dataKey="profit" name="Profit (₹)" stroke="#42BC9E" fillOpacity={1} fill="url(#colorProfit)" />
                 </>
               ) : (
                 <Area type="monotone" dataKey="quantity" name="Quantity" stroke="#FC8B16" fillOpacity={1} fill="url(#colorQuantity)" />
