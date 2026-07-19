@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     
     # Credentials (will load from environment, defaults to empty strings to avoid crashes)
     SARVAM_API_KEY: str = ""
+    SARVAM_API_KEY_FALLBACK: str = ""
     GEMINI_API_KEY: str = ""
+    GEMINI_API_KEY_FALLBACK: str = ""
     GEMINI_MODEL: str = "gemini-flash-lite-latest"
     
     SUPABASE_URL: str = ""

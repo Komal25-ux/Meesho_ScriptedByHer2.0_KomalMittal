@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Type, TypeVar
+from typing import Literal, Optional, Type, TypeVar
 import google.generativeai as genai
 from pydantic import BaseModel, Field
 from backend.config import settings
@@ -67,16 +67,20 @@ class CustomerAgentResponse(AgentResponse):
         "Returns Agent for the customer's next reply - it is not just a descriptive label."
     ))
     purchase_intent_detected: bool = Field(description=(
-        "True ONLY if the customer's wording confirms/finalizes a purchase decision on one specific, "
-        "already-identified item (e.g. 'ye wali pack kardo', 'iska order kardo') AND the product context "
-        "given to you resolves to exactly one product. False for a general/category-level desire to buy or "
-        "browse (e.g. 'saree leni hai', 'kurti chahiye') - that is exploratory, not confirmation, and must "
-        "fall through to a normal product answer instead. Also False if the wording sounds confirmatory but "
-        "no single specific item can be identified from context - ask which item they mean instead of "
-        "guessing. Read by the orchestrator to stop immediately with the reseller-notified confirmation, "
-        "bypassing any further product search. NOTE: do not add a Python-side default here - Gemini's "
-        "response_schema conversion rejects Pydantic Field 'default' metadata outright ('Unknown field for "
-        "Schema: default'), which silently fails every model in the fallback chain and returns None."
+        "Set to true ONLY if the user is confirming they want to buy a SPECIFIC, currently discussed item. "
+        "Captures Hinglish checkout phrases like 'ye lena hai', 'isko pack kar do', 'final karo', or 'ye "
+        "order karna hai'. MUST be false for general browsing like 'saree leni hai'. Note the trap: 'leni'/"
+        "'lena' are just gender-agreement forms of the same verb, so 'saree leni hai' and 'ye lena hai' look "
+        "almost identical on the surface but mean opposite things - the deciding signal is what comes "
+        "immediately before it. A CATEGORY NOUN there ('saree', 'kurti') means exploratory browsing, false. "
+        "A DEMONSTRATIVE PRONOUN there ('ye', 'isko', 'yehi'), pointing at something already shown or "
+        "discussed, means checkout - true, PROVIDED the product context given to you actually resolves to "
+        "exactly one specific item; if the wording sounds confirmatory but no single item can be identified "
+        "from context, this must still be false (ask which item they mean instead of guessing). Read by the "
+        "orchestrator to stop immediately with the reseller-notified confirmation, bypassing any further "
+        "product search. NOTE: do not add a Python-side default here - Gemini's response_schema conversion "
+        "rejects Pydantic Field 'default' metadata outright ('Unknown field for Schema: default'), which "
+        "silently fails every model in the fallback chain and returns None."
     ))
 
 class ReturnsAgentResponse(AgentResponse):
@@ -91,16 +95,79 @@ class ReturnsAgentResponse(AgentResponse):
         "general exchange/refund offer where no specific alternative product is named."
     ))
 
+class IntentRouter(BaseModel):
+    """Structured routing decision for the top-level Orchestrator classifier
+    (see detect_intent in orchestrator.py). Uses Gemini's native structured-
+    output mode (response_schema, via generate_structured_with_fallback) so
+    the model is constrained to emit exactly one of the five valid routes,
+    instead of the old free-text-JSON approach where a malformed or
+    creatively-worded response could fail json.loads entirely or drift
+    outside the valid intent set.
+
+    route_to's allowed values are expressed as a Literal (not a Python Enum
+    class) - Pydantic maps Literal to a JSON Schema enum constraint exactly
+    the same way it would an Enum for Gemini's response_schema conversion,
+    and every other classifier schema in this file already uses this pattern
+    successfully, so this stays consistent rather than introducing a second
+    convention for no behavioral difference. Per-value guidance lives in this
+    field's description below, since that's the only part of a Pydantic enum
+    field Gemini's schema conversion actually transmits to the model in
+    either case - a Python Enum member's docstring/comment is never seen by
+    the model, only the field-level description and the literal value list.
+    """
+    route_to: Literal["CATALOG", "CUSTOMER", "GROWTH", "GENERAL", "RETURNS"] = Field(description=(
+        "The single agent this message should be routed to. Decide by evaluating the user's underlying "
+        "SEMANTIC GOAL - what they are actually trying to accomplish - rather than matching specific "
+        "keywords or exact phrasing. Hindi/Hinglish messages vary enormously in wording for the same "
+        "goal (e.g. 'dikha do', 'dikhao', 'kya hai', 'kuch naya hai kya' can all express the same "
+        "underlying 'show me products' goal despite sharing almost no words).\n\n"
+        "CATALOG: select this if the user wants to browse, view, list, explore options, or see "
+        "products, add/list an item for sale, or set a price for something they are selling. Covers "
+        "Hinglish phrasing implying visual inspection or inventory checks, direct or indirect, including "
+        "bare continuation requests with no product named (asking to see more of what was already being "
+        "shown). Only ever valid when the speaker is the RESELLER managing their own shop - never an "
+        "end customer.\n\n"
+        "CUSTOMER: select this for a buyer's product question (size, material, color, delivery, COD, "
+        "return policy, availability), a return/exchange/complaint a buyer raised, a buyer's purchase or "
+        "order confirmation (however short, even with no product detail in it), or a buyer's own request "
+        "to browse/see more products (including a bare continuation naming nothing new). This is the "
+        "buyer-side counterpart of CATALOG's browsing goal, and the correct route for a return/refund/"
+        "exchange discussion regardless of how it's phrased.\n\n"
+        "GROWTH: select this for sales advice, performance metrics, weekly profit or revenue figures, or "
+        "general business-growth coaching for the reseller.\n\n"
+        "GENERAL: select this for greetings, small talk, or a question about what Sakhi herself can do - "
+        "nothing here implies a product, a sale, or a business metric.\n\n"
+        "RETURNS: reserved. A customer can never self-initiate a return through chat text in this system "
+        "- returns only ever start via a backend system event, never a message. If a return, refund, or "
+        "exchange is being discussed via chat, that is a CUSTOMER-side conversation (the Customer agent "
+        "owns return handling), not a reason to select RETURNS."
+    ))
+
 T = TypeVar("T", bound=BaseModel)
 
+_CURRENT_KEY_INDEX = 0
+
 def configure_gemini() -> bool:
-    if settings.GEMINI_API_KEY and "YOUR_GEMINI" not in settings.GEMINI_API_KEY:
-        try:
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            return True
-        except Exception as e:
-            logger.error(f"Gemini API configuration failed: {e}")
-    return False
+    global _CURRENT_KEY_INDEX
+    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    if not keys:
+        logger.error("No valid Gemini API keys found in settings.")
+        return False
+    try:
+        current_key = keys[_CURRENT_KEY_INDEX % len(keys)]
+        genai.configure(api_key=current_key)
+        return True
+    except Exception as e:
+        logger.error(f"Gemini API configuration failed with key index {_CURRENT_KEY_INDEX}: {e}")
+        return False
+
+def rotate_gemini_key():
+    global _CURRENT_KEY_INDEX
+    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    if keys:
+        _CURRENT_KEY_INDEX = (_CURRENT_KEY_INDEX + 1) % len(keys)
+        logger.info(f"Rotating Gemini API Key index to: {_CURRENT_KEY_INDEX}")
+        configure_gemini()
 
 # The free tier enforces a per-model daily request quota, not a per-key one -
 # trying several models in order means one model running dry doesn't stall
@@ -115,50 +182,71 @@ def _model_chain():
     return chain
 
 def generate_with_fallback(parts):
-    """Tries each model in the fallback chain in order, moving to the next on
-    any failure (quota exhaustion, retirement, transient error). `parts` is
-    whatever genai.GenerativeModel.generate_content accepts - a prompt string,
-    or a list mixing text with {"mime_type": ..., "data": ...} blocks for
-    multimodal input. Returns the response text, or None if every model failed."""
-    if not configure_gemini():
-        return None
+    """Tries each model in the fallback chain in order. If all models fail due to
+    quota exhaustion or invalid keys, rotates to the fallback API key and retries."""
+    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    num_keys = len(keys) if keys else 1
+    
     last_error = None
-    for model_name in _model_chain():
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(parts)
-            text = response.text.strip()
-            if text:
-                return text
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Gemini model '{model_name}' failed, trying next fallback: {e}")
-            continue
-    logger.error(f"All Gemini fallback models failed. Last error: {last_error}")
+    for key_attempt in range(num_keys):
+        if not configure_gemini():
+            return None
+            
+        for model_name in _model_chain():
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(parts)
+                text = response.text.strip()
+                if text:
+                    return text
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Gemini model '{model_name}' failed: {e}")
+                err_msg = str(e).lower()
+                # If it's a quota or credential issue, rotate key immediately
+                if any(w in err_msg for w in ["quota", "exhausted", "429", "403", "invalid", "limit"]):
+                    break
+                continue
+                
+        # If we exhausted all models with this key, rotate to the next key
+        if num_keys > 1:
+            rotate_gemini_key()
+            
+    logger.error(f"All Gemini fallback models and keys failed. Last error: {last_error}")
     return None
 
 def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[T]:
-    """Same fallback chain as generate_with_fallback, but constrains each
-    model's output to the given Pydantic schema via Gemini's native
-    structured-output mode (response_schema), then validates the parsed
-    result. Returns None if every model fails or returns invalid JSON."""
-    if not configure_gemini():
-        return None
+    """Same fallback chain and key rotation as generate_with_fallback, but
+    constrains each model's output to the given Pydantic schema."""
+    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    num_keys = len(keys) if keys else 1
+    
     last_error = None
-    for model_name in _model_chain():
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                    response_schema=schema
+    for key_attempt in range(num_keys):
+        if not configure_gemini():
+            return None
+            
+        for model_name in _model_chain():
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    prompt,
+                    generation_config=genai.GenerationConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema
+                    )
                 )
-            )
-            return schema.model_validate_json(response.text)
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Gemini model '{model_name}' structured call failed, trying next fallback: {e}")
-            continue
-    logger.error(f"All Gemini fallback models failed for structured output. Last error: {last_error}")
+                return schema.model_validate_json(response.text)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Gemini model '{model_name}' structured call failed: {e}")
+                err_msg = str(e).lower()
+                if any(w in err_msg for w in ["quota", "exhausted", "429", "403", "invalid", "limit"]):
+                    break
+                continue
+                
+        if num_keys > 1:
+            rotate_gemini_key()
+            
+    logger.error(f"All Gemini fallback models and keys failed for structured output. Last error: {last_error}")
     return None

@@ -3,6 +3,7 @@ import re
 import subprocess
 import logging
 import httpx
+from typing import Optional
 from backend.config import settings
 from backend.core.gemini_utils import generate_with_fallback
 
@@ -51,43 +52,74 @@ async def convert_to_wav(input_file_path: str) -> str:
         logger.error(f"Failed to transcode audio: {e}")
         raise e
 
+_SARVAM_KEY_INDEX = 0
+
+def get_sarvam_api_key() -> Optional[str]:
+    global _SARVAM_KEY_INDEX
+    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    if not keys:
+        return None
+    return keys[_SARVAM_KEY_INDEX % len(keys)]
+
+def rotate_sarvam_key():
+    global _SARVAM_KEY_INDEX
+    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    if keys:
+        _SARVAM_KEY_INDEX = (_SARVAM_KEY_INDEX + 1) % len(keys)
+        logger.info(f"Rotating Sarvam API Key index to: {_SARVAM_KEY_INDEX}")
+
 async def transcribe_audio(file_path: str) -> str:
     """
     Speech-to-Text conversion:
-    1. Primary: Sarvam Saarika ASR API.
+    1. Primary: Sarvam Saarika ASR API (with API key rotation on exhaustion/errors).
     2. Fallback: Google Gemini 2.5 Flash native audio transcription.
     """
-    # Try Sarvam Saarika
-    if settings.SARVAM_API_KEY and "YOUR_SARVAM" not in settings.SARVAM_API_KEY:
-        try:
-            logger.info("Transcribing audio using Sarvam Saarika ASR API...")
-            async with httpx.AsyncClient() as client:
-                with open(file_path, "rb") as audio_file:
-                    files = {"file": ("audio.wav", audio_file, "audio/wav")}
-                    headers = {"api-subscription-key": settings.SARVAM_API_KEY}
-                    data = {
-                        "model": "saarika:v2.5",
-                        "language_code": "hi-IN"
-                    }
-                    response = await client.post(
-                        "https://api.sarvam.ai/speech-to-text",
-                        headers=headers,
-                        files=files,
-                        data=data,
-                        timeout=30.0
-                    )
-                    
-                    if response.status_code == 200:
-                        transcription = response.json().get("transcript", "")
-                        logger.info(f"Sarvam ASR Success: {transcription}")
-                        if transcription:
-                            return transcription
-                    else:
-                        logger.warning(f"Sarvam ASR returned error {response.status_code}: {response.text}")
-        except Exception as e:
-            logger.error(f"Sarvam ASR API exception: {e}")
+    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    num_keys = len(keys) if keys else 0
+
+    if num_keys > 0:
+        for attempt in range(num_keys):
+            active_key = get_sarvam_api_key()
+            if not active_key:
+                break
+            try:
+                logger.info(f"Transcribing audio using Sarvam Saarika ASR API (Key index {_SARVAM_KEY_INDEX})...")
+                async with httpx.AsyncClient() as client:
+                    with open(file_path, "rb") as audio_file:
+                        files = {"file": ("audio.wav", audio_file, "audio/wav")}
+                        headers = {"api-subscription-key": active_key}
+                        data = {
+                            "model": "saarika:v2.5",
+                            "language_code": "hi-IN"
+                        }
+                        response = await client.post(
+                            "https://api.sarvam.ai/speech-to-text",
+                            headers=headers,
+                            files=files,
+                            data=data,
+                            timeout=30.0
+                        )
+                        
+                        if response.status_code == 200:
+                            transcription = response.json().get("transcript", "")
+                            logger.info(f"Sarvam ASR Success: {transcription}")
+                            if transcription:
+                                return transcription
+                        elif response.status_code in [401, 403, 429]:
+                            logger.warning(f"Sarvam ASR key exhausted/blocked ({response.status_code}). Rotating...")
+                            rotate_sarvam_key()
+                            continue
+                        else:
+                            logger.warning(f"Sarvam ASR returned error {response.status_code}: {response.text}")
+                            rotate_sarvam_key()
+                            continue
+            except Exception as e:
+                logger.error(f"Sarvam ASR API exception: {e}. Rotating...")
+                rotate_sarvam_key()
+                continue
 
     # Fallback: Gemini multimodal audio transcription (tries a chain of models)
+    logger.info("Sarvam ASR failed or unavailable. Using Gemini audio transcription fallback...")
     with open(file_path, "rb") as audio_file:
         audio_bytes = audio_file.read()
 
@@ -107,62 +139,64 @@ async def transcribe_audio(file_path: str) -> str:
 async def synthesize_speech(text: str) -> bytes:
     """
     Text-to-Speech conversion:
-    1. Primary: Sarvam Bulbul TTS API (returns audio bytes).
+    1. Primary: Sarvam Bulbul TTS API (with key rotation on exhaustion/errors).
     2. Fallback: Returns empty bytes (handled in router by returning voice_fallback: true).
     """
-    if settings.SARVAM_API_KEY and "YOUR_SARVAM" not in settings.SARVAM_API_KEY:
-        try:
-            logger.info("Synthesizing speech using Sarvam Bulbul TTS API...")
-            # Sanitize for the voice payload only - the chat UI still shows the
-            # original text with emojis/markdown/₹ intact. Applied here (not at
-            # each call site) so it's a deterministic safety net regardless of
-            # which Gemini fallback model produced the text or how well it
-            # followed the phonetic prompt rules.
-            clean_text = sanitize_for_tts(text)
-            # Sarvam Bulbul TTS rejects inputs over 500 characters; the Catalog agent's
-            # replies (Didi text + WhatsApp caption) regularly exceed this, so clip at a
-            # word boundary for the voice note while the full text still shows in chat.
-            tts_text = clean_text if len(clean_text) <= 500 else clean_text[:500].rsplit(" ", 1)[0]
-            async with httpx.AsyncClient() as client:
-                headers = {
-                    "api-subscription-key": settings.SARVAM_API_KEY,
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "inputs": [tts_text],
-                    "target_language_code": "hi-IN",
-                    # Reverted to "anushka" - the "manisha" swap sounded worse in practice.
-                    # Natural pace (1.0) and the highest sample rate Sarvam accepts for
-                    # bulbul:v2 (24kHz) for clean, artifact-free playback.
-                    "speaker": "anushka",
-                    "model": "bulbul:v2",
-                    "pitch": 0,
-                    "pace": 1.0,
-                    "loudness": 1.5,
-                    "enable_preprocessing": True,
-                    "speech_sample_rate": 24000
-                }
-                response = await client.post(
-                    "https://api.sarvam.ai/text-to-speech",
-                    headers=headers,
-                    json=payload,
-                    timeout=30.0
-                )
-                
-                if response.status_code == 200:
-                    logger.info("Sarvam TTS Success.")
-                    # Sarvam API returns JSON base64 encoded audio or raw bytes depending on endpoints.
-                    # Standard Bulbul POST returns JSON containing base64 string under audios list.
-                    data = response.json()
-                    audios = data.get("audios", [])
-                    if audios:
-                        import base64
-                        audio_b64 = audios[0]
-                        return base64.b64decode(audio_b64)
-                else:
-                    logger.warning(f"Sarvam TTS returned error {response.status_code}: {response.text}")
-        except Exception as e:
-            logger.error(f"Sarvam TTS API exception: {e}")
+    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    num_keys = len(keys) if keys else 0
+
+    if num_keys > 0:
+        for attempt in range(num_keys):
+            active_key = get_sarvam_api_key()
+            if not active_key:
+                break
+            try:
+                logger.info(f"Synthesizing speech using Sarvam Bulbul TTS API (Key index {_SARVAM_KEY_INDEX})...")
+                clean_text = sanitize_for_tts(text)
+                tts_text = clean_text if len(clean_text) <= 500 else clean_text[:500].rsplit(" ", 1)[0]
+                async with httpx.AsyncClient() as client:
+                    headers = {
+                        "api-subscription-key": active_key,
+                        "Content-Type": "application/json"
+                    }
+                    payload = {
+                        "inputs": [tts_text],
+                        "target_language_code": "hi-IN",
+                        "speaker": "anushka",
+                        "model": "bulbul:v2",
+                        "pitch": 0,
+                        "pace": 1.0,
+                        "loudness": 1.5,
+                        "enable_preprocessing": True,
+                        "speech_sample_rate": 24000
+                    }
+                    response = await client.post(
+                        "https://api.sarvam.ai/text-to-speech",
+                        headers=headers,
+                        json=payload,
+                        timeout=30.0
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info("Sarvam TTS Success.")
+                        data = response.json()
+                        audios = data.get("audios", [])
+                        if audios:
+                            import base64
+                            audio_b64 = audios[0]
+                            return base64.b64decode(audio_b64)
+                    elif response.status_code in [401, 403, 429]:
+                        logger.warning(f"Sarvam TTS key exhausted/blocked ({response.status_code}). Rotating...")
+                        rotate_sarvam_key()
+                        continue
+                    else:
+                        logger.warning(f"Sarvam TTS returned error {response.status_code}: {response.text}")
+                        rotate_sarvam_key()
+                        continue
+            except Exception as e:
+                logger.error(f"Sarvam TTS API exception: {e}. Rotating...")
+                rotate_sarvam_key()
+                continue
 
     logger.info("Sarvam TTS not available or failed. Falling back to browser-native TTS.")
     return b""

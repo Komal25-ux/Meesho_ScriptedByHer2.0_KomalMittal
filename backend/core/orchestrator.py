@@ -7,7 +7,7 @@ from pydantic import BaseModel, ValidationError
 import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
-from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse
+from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse, IntentRouter
 
 logger = logging.getLogger("sakhi-backend")
 
@@ -843,102 +843,49 @@ def route_pending_return(state: SakhiState) -> str:
 
 # ── NODE 2: INTENT DETECTION ──────────────────────────────────
 def detect_intent(state: SakhiState) -> SakhiState:
+    """Top-level Orchestrator router. Uses Gemini's structured-output mode
+    (generate_structured_with_fallback + IntentRouter, see gemini_utils.py)
+    rather than free-text JSON parsing - the model is constrained to emit
+    one of exactly five valid route values, so there's no longer a class of
+    bug where a plausible-looking-but-malformed response fails json.loads.
+
+    Deliberately no keyword-based emergency fallback: if structured output
+    fails to parse (or every model in the fallback chain is unreachable -
+    e.g. daily quota exhaustion), this defaults straight to GENERAL. That's
+    a real, known trade-off versus the old behaviour (which still routed
+    correctly via keyword heuristics during a full LLM outage) - GENERAL
+    under a total outage is safe and won't crash the graph, but it does mean
+    outage-time messages get a generic reply instead of being routed
+    correctly. Accepted as the simpler, more predictable failure mode.
+    """
     t_start = time.time()
     user_input = state.get("raw_input", "")
     active_mode = state.get("active_mode", "reseller")
 
     intent = "GENERAL"
-    confidence = 1.0
-    reason = "Fallback default"
 
-    raw_text = None
     if user_input:
-        try:
-            if active_mode == "customer":
-                prompt = f"""
-You are the Orchestrator for Sakhi. You are talking DIRECTLY to an END CUSTOMER (buyer) of a
-Meesho reseller - not the reseller herself. Analyze the customer's input and route it to
-EXACTLY ONE of the following agents:
-1. CUSTOMER: Any product question - size, material, color, delivery, COD, return policy, availability,
-   AND any return/exchange/complaint request (the Customer agent has its own deflection rule for these),
-   AND any purchase/order confirmation, even a short one with no product details in it (the Customer
-   agent has its own logic for handling this - your job here is only to route it there, not to judge
-   whether it's specific enough), AND any request to browse/see more products, even a bare continuation
-   with no product/category named (the Customer agent has its own pagination logic for this too).
-   Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?",
-   "saree choti pad rahi hai, badalna hai", "mujhe ye wapas karna hai", "exchange option hai?",
-   "isse order krdo", "ye lelo bas", "pack kar do", "confirm kardo", "haan yehi chahiye", "book it",
-   "aur dikhao", "kuch aur options", "more dikhao", "aur kya hai", "baaki options bhi dikhao"
-2. GENERAL: Greetings, or general chit-chat about what Sakhi can help with. Do NOT use this bucket just
-   because a message is short or vague - a short purchase confirmation (see CUSTOMER examples above) is
-   never GENERAL.
-   Examples: "hello sakhi", "aap kya kar sakti ho?", "thank you"
-
-User Input: "{user_input}"
-
-Output ONLY a valid JSON block of the format:
-{{"intent": "CUSTOMER|GENERAL", "confidence": 0.0-1.0, "reason": "one sentence explanation"}}
-"""
-            else:
-                prompt = f"""
-You are the Orchestrator for Sakhi, an AI business manager for a Hindi-speaking Meesho reseller.
-Analyze the user's input and route it to EXACTLY ONE of the following agents:
-1. CATALOG: User wants to list a product, set prices, or create a WhatsApp promotional post.
-   Examples: "is saree ko list kar", "add this kurti to my listings for 599", "whatsapp post banao"
-2. CUSTOMER: User is relaying a question a buyer asked (e.g., size, material, delivery, cod, return
-   policies), AND any return/exchange/complaint the buyer raised (the Customer agent has its own
-   deflection rule for these - returns are never processed via chat).
-   Examples: "kya ye red color me hai?", "size L mil jayega?", "return policy kitne din ki hai?",
-   "customer ko return chahiye", "saree choti pad rahi hai, badalna hai", "exchange option hai?"
-3. GROWTH: User is asking for sales advice, performance metrics, weekly profits, or what to sell.
-   Examples: "weekly sales dikhao", "is week kya profit hua?", "meri sales kaise badhayein?"
-4. GENERAL: Greetings, general chit-chat, or listing capabilities.
-   Examples: "hello sakhi", "aap kya kar sakti ho?", "thank you"
-
-User Input: "{user_input}"
-
-Output ONLY a valid JSON block of the format:
-{{"intent": "CATALOG|CUSTOMER|GROWTH|GENERAL", "confidence": 0.0-1.0, "reason": "one sentence explanation"}}
-"""
-            raw_text = generate_with_fallback(prompt)
-            if raw_text:
-                # Strip markdown block ticks if present
-                cleaned = raw_text
-                if cleaned.startswith("```json"):
-                    cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-                elif cleaned.startswith("```"):
-                    cleaned = cleaned.split("```")[1].split("```")[0].strip()
-
-                data = json.loads(cleaned)
-                intent = data.get("intent", "GENERAL").upper()
-                confidence = data.get("confidence", 0.9)
-                reason = data.get("reason", "")
-        except Exception as e:
-            logger.error(f"Intent detection parsing failed: {e}. Falling back to keyword matching.")
-            raw_text = None
-
-    if not raw_text:
-        # Fallback rules based on simple keyword checks - used both when Gemini
-        # isn't configured and when every model in the fallback chain failed.
-        user_lower = user_input.lower()
         if active_mode == "customer":
-            if any(w in user_lower for w in ["return", "wapas", "exchange", "badalna", "choti"]):
-                intent = "CUSTOMER"
-            elif any(w in user_lower for w in ["size", "fabric", "material", "cod", "delivery", "kya ye", "hai"]):
-                intent = "CUSTOMER"
-            elif any(w in user_lower for w in ["order", "khareed", "pack", "confirm", "book", "lelo", "le lo", "chahiye"]):
-                intent = "CUSTOMER"
-            elif any(w in user_lower for w in ["dikhao", "aur", "more", "options", "baaki"]):
-                intent = "CUSTOMER"
+            prompt = f"""You are the Orchestrator for Sakhi. You are talking DIRECTLY to an END CUSTOMER (buyer) of a
+Meesho reseller - not the reseller herself.
+
+Evaluate the customer's message below and select the route that matches their underlying semantic
+goal. Only CUSTOMER and GENERAL are ever valid choices when talking to a customer directly - a
+customer can never trigger CATALOG (listing/pricing is reseller-only) or GROWTH (business metrics are
+reseller-only); if the message's goal would otherwise map to one of those, route to GENERAL instead.
+
+Customer's message: "{user_input}"
+"""
         else:
-            if any(w in user_lower for w in ["list", "add", "daal", "saree ko list", "post"]):
-                intent = "CATALOG"
-            elif any(w in user_lower for w in ["size", "fabric", "material", "cod", "delivery", "kya ye", "hai"]):
-                intent = "CUSTOMER"
-            elif any(w in user_lower for w in ["sales", "profit", "growth", "coaching", "weekly", "paisa"]):
-                intent = "GROWTH"
-            elif any(w in user_lower for w in ["return", "wapas", "exchange", "badalna", "choti"]):
-                intent = "CUSTOMER"
+            prompt = f"""You are the Orchestrator for Sakhi, an AI business manager for a Hindi-speaking Meesho reseller.
+
+Evaluate the reseller's message below and select the route that matches their underlying semantic goal.
+
+Reseller's message: "{user_input}"
+"""
+        result = generate_structured_with_fallback(prompt, IntentRouter)
+        if result:
+            intent = result.route_to
 
     # Safety clamp: a customer chatting directly should never trigger reseller-only
     # agents (Catalog listing, Growth analytics) even if the LLM misroutes.
@@ -947,16 +894,18 @@ Output ONLY a valid JSON block of the format:
 
     # The Returns Agent is only reachable via the backend system webhook
     # (/api/v1/system/trigger-return) - a customer must never be able to
-    # self-initiate a return via chat text. The prompts above no longer offer
-    # RETURNS as an option, but this is a hard backstop in case the classifier
-    # emits it anyway: reroute to the Customer Agent, which carries a
-    # deterministic Return Deflection Rule for exactly this case.
+    # self-initiate a return via chat text. IntentRouter's schema still lists
+    # RETURNS (see gemini_utils.py) so structured output has a well-formed
+    # place to put a return-shaped message if the model reaches for it
+    # anyway, but this is the actual enforcement: reroute to the Customer
+    # Agent, which carries a deterministic Return Deflection Rule for exactly
+    # this case.
     if intent == "RETURNS":
         intent = "CUSTOMER"
 
     state["detected_intent"] = intent
-    state["intent_confidence"] = confidence
-    
+    state["intent_confidence"] = 1.0
+
     latency = int((time.time() - t_start) * 1000)
     log_event = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -965,9 +914,7 @@ Output ONLY a valid JSON block of the format:
         "latency_ms": latency,
         "data": {
             "detected_intent": intent,
-            "confidence": confidence,
-            "trigger_text": user_input,
-            "reason": reason
+            "trigger_text": user_input
         }
     }
     state["trace_logs"].append(log_event)
@@ -978,7 +925,7 @@ Output ONLY a valid JSON block of the format:
         "latency_ms": latency,
         "payload": log_event["data"]
     })
-    
+
     return state
 
 # ── CONDITIONAL ROUTE FUNCTION ────────────────────────────────
@@ -1510,9 +1457,14 @@ Not every mention of buying is a completed decision - you must strictly separate
 
 CRITICAL RULE: do NOT set purchase_intent_detected to true if the user is making a general inquiry about a category or type of product (e.g. "saree leni hai", "kurti chahiye", "kuch dikhao", "kya options hain", "mujhe ek achi saree chahiye"). This is EXPLORATORY - no specific item has been pinned down yet, only a desire to be shown some. Skip this priority entirely and fall through to Product Query Handling below, where you retrieve and describe matching products from CONTEXT as usual.
 
+WATCH FOR THIS TRAP: "leni"/"lena" are just gender-agreement forms of the same verb ("to take"), so an EXPLORATORY phrase and a CHECKOUT phrase can look almost identical on the surface - the deciding signal is what comes immediately before "leni/lena hai", not the verb itself:
+- "saree leni hai" (a CATEGORY NOUN before it) = EXPLORATORY. purchase_intent_detected: false.
+- "ye lena hai" or "ye wali" (a DEMONSTRATIVE PRONOUN before it, pointing at something already shown or discussed - see condition (b) below) = CHECKOUT, same as "order kar do"/"pack kar do".
+Apply the same noun-vs-pronoun test to any other confirmatory-sounding verb, not just this pair.
+
 ONLY set purchase_intent_detected to true if BOTH of these hold:
-(a) The wording confirms/finalizes a purchase decision, on one specific already-identified item rather than a category. This does NOT require an explicit pronoun ("isko"/"ye"/"yehi") - a bare confirmation like "order kar do", "pack kar do", or "confirm kar do" with no other product/category mentioned is just as much a confirmation as "ye wali pack kardo", "haan ye done hai", "iska order kardo", "isse le lo", "yehi confirm kardo". The only thing that makes it EXPLORATORY instead (see above) is naming/asking about a category or new item.
-(b) EXACTLY ONE product is established as the referent for words like "isko"/"ye"/"yehi"/"isse". This holds if EITHER: CONTEXT below (this message's own product matches) contains exactly one product; OR CONTEXT is empty/ambiguous but RECENTLY DISCUSSED ITEM below is present AND this message does not itself name or ask about some other specific product or category (a bare confirmation phrase like "isko order kar do" has no product-specific words in it, so its own CONTEXT will usually be empty or noisy - RECENTLY DISCUSSED ITEM is what resolves "isko" in that case). If neither holds, nothing specific has actually been pinned down, so confirming an order is logically impossible no matter how confirmatory the wording sounds - condition (b) fails and purchase_intent_detected MUST stay false.
+(a) The wording confirms/finalizes a purchase decision, on one specific already-identified item rather than a category. This does NOT require an explicit pronoun ("isko"/"ye"/"yehi") - a bare confirmation like "order kar do", "pack kar do", "confirm kar do", or "final karo" with no other product/category mentioned is just as much a confirmation as "ye wali pack kardo", "haan ye done hai", "iska order kardo", "isse le lo", "yehi confirm kardo", "ye lena hai", "isko pack kar do", "ye order karna hai". The only thing that makes it EXPLORATORY instead (see the CRITICAL RULE / trap above) is naming/asking about a category or a new item.
+(b) EXACTLY ONE product is established as the referent for words like "isko"/"ye"/"yehi"/"isse". This holds if EITHER: CONTEXT below (this message's own product matches) contains exactly one product; OR CONTEXT is empty/ambiguous but RECENTLY DISCUSSED ITEM below is present AND this message does not itself name or ask about some other specific product or category (a bare confirmation phrase like "isko order kar do" has no product-specific words in it, so its own CONTEXT will usually be empty or noisy - RECENTLY DISCUSSED ITEM is what resolves "isko" in that case). If neither holds, nothing specific has actually been pinned down, so confirming an order is logically impossible no matter how confirmatory the wording sounds - condition (b) fails and purchase_intent_detected MUST stay false. Concretely: if "ye lena hai" arrives out of nowhere - CONTEXT empty/ambiguous AND RECENTLY DISCUSSED ITEM is "None." - do not invent a referent for "ye". Condition (b) fails; fall through to the clarification branch below instead of confirming.
 
 RECENTLY DISCUSSED ITEM (the last product this customer was specifically shown/answered about, from an earlier message - "None." if nothing yet):
 {recent_context_str}
