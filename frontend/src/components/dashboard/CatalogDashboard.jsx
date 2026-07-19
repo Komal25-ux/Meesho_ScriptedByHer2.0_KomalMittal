@@ -51,8 +51,11 @@ function SegmentedToggle({ options, value, onChange }) {
   );
 }
 
-function PastOrderCard({ product, isTopSeller, isTopProfit }) {
-  const glow = isTopSeller || isTopProfit;
+// Central en-IN comma formatter, used for every revenue/profit/price value
+// rendered in this dashboard so ₹54090 always reads as ₹54,090.
+const inr = (value) => Number(value).toLocaleString('en-IN');
+
+function PastOrderCard({ product, isTopPerformer }) {
   // Selling price isn't tracked per-transaction in mockSalesData - derived
   // here from the same product's revenue/quantity ratio, the actual average
   // per-unit price the reseller sold at over the window.
@@ -61,7 +64,7 @@ function PastOrderCard({ product, isTopSeller, isTopProfit }) {
   return (
     <div
       className={`bg-white rounded-lg border border-gray-200 p-3 transition ${
-        glow ? 'ring-2 ring-[#42BC9E] shadow-[0_0_15px_rgba(66,188,158,0.5)]' : ''
+        isTopPerformer ? 'ring-2 ring-[#42BC9E] shadow-[0_0_15px_rgba(66,188,158,0.5)]' : ''
       }`}
     >
       <h4 className="text-xs font-bold text-meesho-dark truncate mb-2" title={product.productName}>
@@ -74,9 +77,9 @@ function PastOrderCard({ product, isTopSeller, isTopProfit }) {
           className="w-full h-full object-cover"
         />
       </div>
-      <p className="text-xs text-meesho-dark font-semibold">₹{sellingPrice}</p>
+      <p className="text-xs text-meesho-dark font-semibold">₹{inr(sellingPrice)}</p>
       <p className="text-[11px] text-gray-500">Sold: {product.totalArticlesSold} units</p>
-      <p className="text-[11px] text-meesho-teal font-medium">Profit: ₹{product.totalProfit.toLocaleString('en-IN')}</p>
+      <p className="text-[11px] text-meesho-teal font-medium">Profit: ₹{inr(product.totalProfit)}</p>
     </div>
   );
 }
@@ -90,7 +93,7 @@ function CatalogCard({ product }) {
       <div className="w-full aspect-square rounded-md overflow-hidden bg-gray-100 mb-2">
         <img src={product.imageUrl} alt={product.name} className="w-full h-full object-cover" />
       </div>
-      <p className="text-[11px] text-gray-500">Your Cost: ₹{product.costPrice}</p>
+      <p className="text-[11px] text-gray-500">Your Cost: ₹{inr(product.costPrice)}</p>
     </div>
   );
 }
@@ -100,12 +103,13 @@ export default function CatalogDashboard() {
 
   const pastOrders = useMemo(() => aggregatePastOrders(mockSalesData), []);
 
-  const { maxArticlesSold, maxProfit } = useMemo(() => {
-    if (pastOrders.length === 0) return { maxArticlesSold: 0, maxProfit: 0 };
-    return {
-      maxArticlesSold: Math.max(...pastOrders.map((p) => p.totalArticlesSold)),
-      maxProfit: Math.max(...pastOrders.map((p) => p.totalProfit))
-    };
+  // Top 3-4 best sellers by units moved (not just the single #1) get the
+  // green glow - ranked on totalArticlesSold since "best seller" is a sales
+  // ranking, not a profit one.
+  const TOP_PERFORMER_COUNT = 4;
+  const topPerformers = useMemo(() => {
+    const sorted = [...pastOrders].sort((a, b) => b.totalArticlesSold - a.totalArticlesSold);
+    return new Set(sorted.slice(0, TOP_PERFORMER_COUNT).map((p) => p.productName));
   }, [pastOrders]);
 
   return (
@@ -128,8 +132,7 @@ export default function CatalogDashboard() {
             <PastOrderCard
               key={product.productName}
               product={product}
-              isTopSeller={product.totalArticlesSold === maxArticlesSold}
-              isTopProfit={product.totalProfit === maxProfit}
+              isTopPerformer={topPerformers.has(product.productName)}
             />
           ))}
         </div>

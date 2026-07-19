@@ -136,6 +136,29 @@ const tooltipStyle = {
   itemStyle: { color: '#FFFFFF' }
 };
 
+// en-IN comma formatting for every revenue/profit/sales number rendered in
+// this dashboard, so ₹54090 always reads as ₹54,090 (also what makes TTS
+// read the same number aloud as a whole word instead of digit-by-digit -
+// see prompt_growth_agent.md).
+const inr = (value) => Number(value).toLocaleString('en-IN');
+
+// Pie slices only carry their own value, not the whole-chart total, so the
+// percentage share has to be computed here from the full categoryData array
+// passed in as a prop - can't be derived from `payload` alone since Recharts
+// only hands the hovered slice to the tooltip.
+function PieTooltip({ active, payload, total, metric }) {
+  if (!active || !payload || !payload.length) return null;
+  const { name, value } = payload[0];
+  const share = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
+  const formattedValue = metric === 'sales' ? `₹${inr(value)}` : inr(value);
+  return (
+    <div style={tooltipStyle.contentStyle}>
+      <p style={{ ...tooltipStyle.labelStyle, margin: 0 }}>{name}</p>
+      <p style={{ ...tooltipStyle.itemStyle, margin: 0 }}>{formattedValue} ({share}%)</p>
+    </div>
+  );
+}
+
 export default function GrowthDashboard() {
   const [timeframe, setTimeframe] = useState('weekly'); // 'weekly' | 'monthly'
   const [metric, setMetric] = useState('sales'); // 'sales' | 'quantity'
@@ -148,6 +171,10 @@ export default function GrowthDashboard() {
   const categoryData = useMemo(
     () => buildCategoryBreakdown(mockSalesData, windowDays, metric),
     [windowDays, metric]
+  );
+  const categoryTotal = useMemo(
+    () => categoryData.reduce((sum, entry) => sum + entry.value, 0),
+    [categoryData]
   );
 
   return (
@@ -216,7 +243,7 @@ export default function GrowthDashboard() {
                   style: { fontSize: '9px', fontFamily: 'monospace', fill: '#1E1E24' }
                 }}
               />
-              <Tooltip {...tooltipStyle} formatter={(value, name) => [metric === 'sales' ? `₹${value}` : value, name]} />
+              <Tooltip {...tooltipStyle} formatter={(value, name) => [metric === 'sales' ? `₹${inr(value)}` : inr(value), name]} />
               {metric === 'sales' ? (
                 <>
                   <Area type="monotone" dataKey="sales" name="Sales (₹)" stroke="#9F2089" fillOpacity={1} fill="url(#colorSales)" />
@@ -255,7 +282,7 @@ export default function GrowthDashboard() {
                   ))}
                 </Pie>
                 <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace', color: '#1E1E24' }} />
-                <Tooltip {...tooltipStyle} formatter={(value) => (metric === 'sales' ? `₹${value}` : value)} />
+                <Tooltip content={<PieTooltip total={categoryTotal} metric={metric} />} />
               </PieChart>
             </ResponsiveContainer>
           )}

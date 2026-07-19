@@ -1750,8 +1750,8 @@ def run_growth_agent(state: SakhiState) -> SakhiState:
     else:
         data_summary = (
             f"Timeframe: last {metrics['days']} days\n"
-            f"Total Revenue: {metrics['total_revenue']} rupaye\n"
-            f"Total Profit: {metrics['total_profit']} rupaye\n"
+            f"Total Revenue: {metrics['total_revenue']:,} rupaye\n"
+            f"Total Profit: {metrics['total_profit']:,} rupaye\n"
             f"Orders in this period: {metrics['order_count']}\n"
             f"Top-Selling Item (by quantity): {metrics['top_selling_item']}\n"
             f"Top Category (by revenue): {metrics['top_category']}"
@@ -1768,6 +1768,7 @@ Communication Rules:
 1. Language: Use friendly, professional Hinglish (Hindi written in the English alphabet).
 2. Tone: Encouraging, analytical, and actionable. Address the reseller as "Didi" or "{reseller_name} ji".
 3. Structure: Always use emojis and bullet points for readability.
+4. Number Formatting (for correct audio pronunciation): When writing large numbers (revenue, profit, item counts), always use standard comma formatting - e.g. write "54,090", never the raw unformatted "54090". The DATA SUMMARY above already gives you comma-formatted numbers; copy them exactly as-is rather than removing the commas. This applies in both ui_text and tts_text - a TTS engine reads "54,090" as "fifty-four thousand ninety" but reads unformatted "54090" digit-by-digit ("five-four-zero-nine-zero"), which sounds broken to the reseller.
 
 Required Report Structure:
 1. Greeting & Timeframe: Acknowledge the requested time period ({metrics['days']} din).
@@ -1795,7 +1796,7 @@ Example Output (for illustration of tone/structure only - use the real numbers f
 Kya aap kisi specific category ke baare mein aur details janna chahti hain?"
 
 You must output your response using the provided JSON schema. ui_text must be written in Hinglish following the structure above. tts_text must be a direct, word-for-word translation of that exact message into pure Devanagari script.
-In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799"). No markdown formatting (*, _, #) or emojis in tts_text - Devanagari and basic punctuation only.
+In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799", or "54,090 रुपये" instead of "₹54090" - keep the comma from the number, do not remove it). No markdown formatting (*, _, #) or emojis in tts_text - Devanagari and basic punctuation only.
 """
     result = generate_structured_with_fallback(growth_prompt, AgentResponse)
     reply_text = result.ui_text if result else ""
@@ -1808,13 +1809,13 @@ In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari
         else:
             reply_text = (
                 f"Namaste {reseller_name} didi! Pichle {metrics['days']} din ka business analysis: "
-                f"Total Revenue ₹{metrics['total_revenue']}, Total Profit ₹{metrics['total_profit']}. "
+                f"Total Revenue ₹{metrics['total_revenue']:,}, Total Profit ₹{metrics['total_profit']:,}. "
                 f"Sabse zyada bikne wala item {metrics['top_selling_item']} raha, aur sabse zyada profit "
                 f"{metrics['top_category']} category se hua. Ise WhatsApp status par aur promote karein!"
             )
             reply_tts_text = (
                 f"नमस्ते {reseller_name} दीदी! पिछले {metrics['days']} दिन का बिज़नेस एनालिसिस: "
-                f"टोटल रेवेन्यू {metrics['total_revenue']} रुपये, टोटल प्रॉफिट {metrics['total_profit']} रुपये। "
+                f"टोटल रेवेन्यू {metrics['total_revenue']:,} रुपये, टोटल प्रॉफिट {metrics['total_profit']:,} रुपये। "
                 f"सबसे ज़्यादा बिकने वाला आइटम {metrics['top_selling_item']} रहा, और सबसे ज़्यादा प्रॉफिट "
                 f"{metrics['top_category']} केटेगरी से हुआ। इसे व्हाट्सएप स्टेटस पर और प्रमोट करें!"
             )

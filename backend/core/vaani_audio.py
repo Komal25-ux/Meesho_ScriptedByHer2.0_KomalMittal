@@ -20,7 +20,10 @@ _RUPEE_PATTERN = re.compile(r"\u20B9\s?(\d[\d,]*)")
 _TTS_WHITELIST_PATTERN = re.compile(r"[^a-zA-Z0-9\u0900-\u097F\u0964\u0965 ,.?!]")
 
 def sanitize_for_tts(text: str) -> str:
-    text = _RUPEE_PATTERN.sub(lambda m: f"{m.group(1).replace(',', '')} \u0930\u0941\u092A\u092F\u0947", text)
+    # Keep the digit group's own commas (Sarvam reads "54,090" as a whole
+    # number naturally; stripping them here would leave raw "54090" digits,
+    # which Sarvam reads one-by-one instead - see prompt_growth_agent.md).
+    text = _RUPEE_PATTERN.sub(lambda m: f"{m.group(1)} \u0930\u0941\u092A\u092F\u0947", text)
     text = _TTS_WHITELIST_PATTERN.sub(" ", text)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 

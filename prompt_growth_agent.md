@@ -33,6 +33,7 @@ Communication Rules:
 1. Language: Use friendly, professional Hinglish (Hindi written in the English alphabet).
 2. Tone: Encouraging, analytical, and actionable. Address the reseller as "Didi" or "Suneeta ji".
 3. Structure: Always use emojis and bullet points for readability.
+4. Number Formatting: Always write large numbers with commas (e.g. "54,090", not "54090"), in both ui_text and tts_text. Sarvam TTS reads a comma-formatted number as a whole word ("fifty-four thousand ninety") but reads an unformatted one digit-by-digit ("five-four-zero-nine-zero"), so this is what keeps voice replies from sounding broken.
 
 Required Report Structure:
 1. Greeting & Timeframe: Acknowledge the requested time period.
@@ -60,6 +61,9 @@ Kya aap kisi specific category ke baare mein aur details janna chahti hain?"
 
 ### Additions beyond the base text
 Two things are layered on top of the text above when it's actually assembled in `orchestrator.py`, both necessary for the agent to function correctly rather than being purely cosmetic:
-- **DATA SUMMARY injection**: the Python-computed metrics (§3) are inserted before the Communication Rules, with an explicit instruction not to recalculate or invent numbers - this is what makes the "pre-calculated data summary" the base text refers to actually exist in the prompt the model receives.
+- **DATA SUMMARY injection**: the Python-computed metrics (§3) are inserted before the Communication Rules, with an explicit instruction not to recalculate or invent numbers - this is what makes the "pre-calculated data summary" the base text refers to actually exist in the prompt the model receives. `total_revenue`/`total_profit` are formatted with commas (`{value:,}`) before injection, so the model has a correctly-formatted number to copy rather than having to format one itself.
 - **No-sales rule**: if DATA SUMMARY reports zero transactions in the window, the model is told to acknowledge that gently and encourage promotion instead of fabricating a report - the base text's structure otherwise implicitly assumes there's always something to report.
 - **Standard dual-output/TTS rules**: the same phonetic/formatting rules every other agent's prompt in this file carries (spell "Sakhi" phonetically, no `₹` symbol in `tts_text`, output via the `AgentResponse` JSON schema) - omitted from the base text above since they're not specific to Growth coaching, but present in the actual prompt.
+
+### Why the comma-formatting rule exists
+Sarvam Bulbul TTS reads a comma-formatted number as a whole quantity ("54,090" -> "fifty-four thousand ninety") but reads an unformatted one digit-by-digit ("54090" -> "five-four-zero-nine-zero"), which sounds broken. `sanitize_for_tts()` in `backend/core/vaani_audio.py` (the cleaning step every `reply_tts_text` passes through before hitting the Sarvam API) preserves whatever commas are already in the text - it does not strip them - so keeping the comma at the prompt-output stage (Communication Rule 4 above) is what actually fixes the pronunciation, not the cleaning step itself.
