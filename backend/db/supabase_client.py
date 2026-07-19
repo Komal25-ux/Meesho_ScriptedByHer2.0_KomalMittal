@@ -122,6 +122,17 @@ class SupabaseDB:
             logger.error(f"Error in get_active_listings: {e}")
             return []
 
+    def is_product_listed(self, reseller_id: str, product_id: str) -> bool:
+        """Check if a product is listed by a reseller."""
+        if self.is_mock():
+            return product_id == "SKU_001"
+        try:
+            res = self.client.table("listings").select("id").eq("reseller_id", reseller_id).eq("product_id", product_id).eq("is_active", True).execute()
+            return bool(res.data)
+        except Exception as e:
+            logger.error(f"Error in is_product_listed: {e}")
+            return False
+
     def save_order(self, order_data: dict) -> dict:
         """Save a transaction order."""
         if self.is_mock():

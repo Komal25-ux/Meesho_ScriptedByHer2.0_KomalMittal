@@ -116,6 +116,7 @@ async def chat_send(
             "reply_purchase_intent_detected": False,
             "reply_confirmed_product_name": None,
             "reply_confirmed_product_price": None,
+            "reply_confirmed_product_is_unlisted": False,
             "reply_handoff_triggered": False,
             "trace_logs": [],
             "context_data": None
@@ -174,6 +175,7 @@ async def chat_send(
             "purchase_intent_detected": bool(result.get("reply_purchase_intent_detected")),
             "confirmed_product_name": result.get("reply_confirmed_product_name"),
             "confirmed_product_price": result.get("reply_confirmed_product_price"),
+            "confirmed_product_is_unlisted": bool(result.get("reply_confirmed_product_is_unlisted")),
             "handoff_triggered": bool(result.get("reply_handoff_triggered"))
         }
 

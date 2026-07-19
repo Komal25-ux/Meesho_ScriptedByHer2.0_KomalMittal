@@ -3,7 +3,11 @@ import { Bell } from 'lucide-react';
 
 function notificationText(n) {
   if (n.type === 'order') {
-    return `${n.customer} ne ${n.product} (₹${n.price}) ka order confirm kiya hai.`;
+    let text = `${n.customer} ne ${n.product} (₹${n.price}) ka order confirm kiya hai.`;
+    if (n.is_unlisted) {
+      text += ` Didi, aapne yeh product abhi tak list nahi kiya hai. Kripya isse list karke iska custom price set kar lijiye! 🌸`;
+    }
+    return text;
   }
   return `${n.customer} aapse baat karna chahti hain.`;
 }

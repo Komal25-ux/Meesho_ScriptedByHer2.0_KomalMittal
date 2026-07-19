@@ -232,6 +232,7 @@ export default function App() {
           customer: 'Payal',
           product: data.confirmed_product_name || 'item',
           price: data.confirmed_product_price ?? '',
+          is_unlisted: !!data.confirmed_product_is_unlisted,
           read: false
         },
         ...prev

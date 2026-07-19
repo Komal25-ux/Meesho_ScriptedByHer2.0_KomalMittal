@@ -466,6 +466,7 @@ class SakhiState(TypedDict):
     reply_purchase_intent_detected: bool
     reply_confirmed_product_name: Optional[str]
     reply_confirmed_product_price: Optional[int]
+    reply_confirmed_product_is_unlisted: Optional[bool]
     # Set when this turn was a terminal Returns Retention Funnel handoff to
     # the human reseller (Scenario A hard-return or Scenario E exchange-
     # confirmed - see check_pending_return), for the same Notification Bell.
@@ -1132,7 +1133,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         options = [
             {
                 "name": p.get("name"),
-                "price": p.get("suggested_selling_price_inr") or (p.get("meesho_cost_inr", 350) + 150),
+                "price": p.get("suggested_selling_price_inr") or max(p.get("meesho_cost_inr", 350) + 150, int(p.get("meesho_cost_inr", 350) / 0.7)),
                 "base_image_url": p.get("base_image_url") or f"https://picsum.photos/seed/{p.get('product_id')}/600/400"
             }
             for p in similar_skus[:4]
@@ -1175,7 +1176,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         # Auto listing margin logic
         cost = matched_product.get("meesho_cost_inr", 350)
         # Check if user mentioned custom selling price
-        suggested_selling_price = matched_product.get("suggested_selling_price_inr", cost + 150)
+        suggested_selling_price = matched_product.get("suggested_selling_price_inr") or max(cost + 150, int(cost / 0.7))
 
         # Simple extraction for custom price in text (e.g. "599")
         words = user_input.split()
@@ -1482,6 +1483,34 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
             })
             return state
 
+    reseller_id = state.get("reseller_id", "")
+    for p in similar_skus:
+        p_id = p.get("product_id")
+        is_listed = False
+        if reseller_id and p_id:
+            is_listed = db_client.is_product_listed(reseller_id, p_id)
+        p["is_unlisted"] = not is_listed
+        if not is_listed:
+            cost = p.get("meesho_cost_inr", 350)
+            price_30_margin = int(cost / 0.7)
+            price_min_profit = cost + 150
+            dynamic_price = max(price_min_profit, price_30_margin)
+            p["suggested_selling_price_inr"] = dynamic_price
+
+    recent_product = LAST_VIEWED_PRODUCT.get(session_key)
+    if recent_product:
+        rp_id = recent_product.get("product_id")
+        is_rp_listed = False
+        if reseller_id and rp_id:
+            is_rp_listed = db_client.is_product_listed(reseller_id, rp_id)
+        recent_product["is_unlisted"] = not is_rp_listed
+        if not is_rp_listed:
+            cost = recent_product.get("meesho_cost_inr", 350)
+            price_30_margin = int(cost / 0.7)
+            price_min_profit = cost + 150
+            dynamic_price = max(price_min_profit, price_30_margin)
+            recent_product["suggested_selling_price_inr"] = dynamic_price
+
     def _format_product_line(p: Dict[str, Any]) -> str:
         return (
             f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
@@ -1633,6 +1662,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         state["reply_purchase_intent_detected"] = True
         state["reply_confirmed_product_name"] = confirmed_product.get("name") if confirmed_product else None
         state["reply_confirmed_product_price"] = confirmed_product.get("suggested_selling_price_inr") if confirmed_product else None
+        state["reply_confirmed_product_is_unlisted"] = confirmed_product.get("is_unlisted", False) if confirmed_product else False
 
         latency = int((time.time() - t_start) * 1000)
         log_event = {
