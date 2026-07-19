@@ -1,6 +1,8 @@
+import re
 import time
 import json
 import logging
+import datetime
 from typing import TypedDict, Optional, List, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, ValidationError
@@ -8,6 +10,7 @@ import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
 from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse, IntentRouter
+from backend.data.mock_sales_data import MOCK_SALES_DATA
 
 logger = logging.getLogger("sakhi-backend")
 
@@ -1679,41 +1682,146 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     return state
 
 # ── NODE 5: GROWTH AGENT ──────────────────────────────────────
+def _extract_timeframe_days(user_input: str, default_days: int = 7) -> int:
+    """Pulls a requested day-count out of phrasing like "15 din ka data" or
+    "pichle 30 days" -> 15 / 30. Deterministic regex, not an LLM call - the
+    same reasoning as _extract_price above: pulling one number out of text is
+    a task regex handles reliably and near-instantly, so spending a full
+    model round-trip on it would only add latency for no accuracy benefit."""
+    match = re.search(r"\b(\d{1,3})\s*(?:din|dino|days?)\b", user_input, re.IGNORECASE)
+    if match:
+        days = int(match.group(1))
+        return days if days > 0 else default_days
+    return default_days
+
+def _aggregate_sales_for_window(transactions: list, days: int) -> Dict[str, Any]:
+    """Filters MOCK_SALES_DATA to the last `days` calendar days ending at the
+    dataset's own latest date (derived, not hardcoded, so this stays correct
+    if the dataset's range ever changes) and computes the Growth Agent's
+    pre-calculated metrics in Python - total_revenue, total_profit, the
+    top-selling item by quantity, and the top category by revenue. The LLM
+    never sees raw transactions or does this arithmetic itself; it only ever
+    receives the already-correct numbers below (same zero-hallucination
+    principle as every other RAG-grounded node in this file)."""
+    if not transactions:
+        return {
+            "days": days, "total_revenue": 0, "total_profit": 0,
+            "top_selling_item": None, "top_category": None, "order_count": 0
+        }
+
+    anchor = max(t["date"] for t in transactions)
+    anchor_date = datetime.date.fromisoformat(anchor)
+    window_start = anchor_date - datetime.timedelta(days=days - 1)
+    window_start_str = window_start.isoformat()
+
+    filtered = [t for t in transactions if window_start_str <= t["date"] <= anchor]
+
+    total_revenue = sum(t["revenue"] for t in filtered)
+    total_profit = sum(t["profit"] for t in filtered)
+
+    quantity_by_item: Dict[str, int] = {}
+    revenue_by_category: Dict[str, int] = {}
+    for t in filtered:
+        quantity_by_item[t["productName"]] = quantity_by_item.get(t["productName"], 0) + t["quantity"]
+        revenue_by_category[t["category"]] = revenue_by_category.get(t["category"], 0) + t["revenue"]
+
+    top_selling_item = max(quantity_by_item, key=quantity_by_item.get) if quantity_by_item else None
+    top_category = max(revenue_by_category, key=revenue_by_category.get) if revenue_by_category else None
+
+    return {
+        "days": days,
+        "total_revenue": total_revenue,
+        "total_profit": total_profit,
+        "top_selling_item": top_selling_item,
+        "top_category": top_category,
+        "order_count": len(filtered),
+    }
+
 def run_growth_agent(state: SakhiState) -> SakhiState:
     t_start = time.time()
-    reseller_id = state.get("reseller_id")
+    user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
-    
-    # Query sales metrics from Supabase
-    analytics = db_client.get_weekly_analytics(reseller_id)
-    
-    growth_prompt = f"""
-You are 'Growth Didi', a business success coach for Meesho reseller {reseller_name}.
-Provide sales insights and business advice in warm conversational Hinglish based on their weekly metrics below:
 
-Weekly Sales: ₹{analytics.get('sales_this_week_inr')}
-Weekly Profit: ₹{analytics.get('profit_this_week_inr')}
-Total Active Listings: {analytics.get('active_listings_count')}
-Orders Received: {analytics.get('orders_count')}
+    requested_days = _extract_timeframe_days(user_input, default_days=7)
+    metrics = _aggregate_sales_for_window(MOCK_SALES_DATA, requested_days)
 
-Rules:
-- Start with a warm greeting (e.g. "Namaste Sunita Didi!").
-- Give them simple tips to sell more sarees/kurtis this week (e.g., share on WhatsApp stories in the afternoon, message top 5 repeat buyers).
-- Keep it encouraging and under 6 lines.
-- You must output your response using the provided JSON schema. ui_text must be written in Hinglish (e.g. "Haan didi"). tts_text must be a direct, word-for-word translation of that exact message into Devanagari script (e.g. "हाँ दीदी").
-- In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799").
+    if metrics["order_count"] == 0:
+        data_summary = f"No sales were recorded in the last {requested_days} days."
+    else:
+        data_summary = (
+            f"Timeframe: last {metrics['days']} days\n"
+            f"Total Revenue: {metrics['total_revenue']} rupaye\n"
+            f"Total Profit: {metrics['total_profit']} rupaye\n"
+            f"Orders in this period: {metrics['order_count']}\n"
+            f"Top-Selling Item (by quantity): {metrics['top_selling_item']}\n"
+            f"Top Category (by revenue): {metrics['top_category']}"
+        )
+
+    growth_prompt = f"""You are Sakhi, an expert AI Business & Growth Coach for Meesho Resellers. Your goal is to analyze the provided sales data summary and present a clear, encouraging, and actionable report to the reseller (Suneeta).
+
+You will receive a pre-calculated data summary for the requested timeframe (e.g. last 10, 15, or 30 days).
+
+DATA SUMMARY (already computed - do not recalculate or invent any numbers, use these exactly):
+{data_summary}
+
+Communication Rules:
+1. Language: Use friendly, professional Hinglish (Hindi written in the English alphabet).
+2. Tone: Encouraging, analytical, and actionable. Address the reseller as "Didi" or "{reseller_name} ji".
+3. Structure: Always use emojis and bullet points for readability.
+
+Required Report Structure:
+1. Greeting & Timeframe: Acknowledge the requested time period ({metrics['days']} din).
+2. Performance Snapshot: State the Total Revenue and Total Profit clearly.
+3. Star Performers: Highlight the top-selling item and the most profitable category based on the data.
+4. Growth Advice (Actionable): Give 2 specific tips based on the top performers (e.g. "Since Kurtis are selling fast, you should run a combo offer," or "Focus on sharing more Saree catalogs in WhatsApp groups because they yield higher margins.").
+
+If DATA SUMMARY says no sales were recorded, do not invent a report - acknowledge that gently and encourage the reseller to start promoting, instead of fabricating revenue/profit/top performers.
+
+Example Output (for illustration of tone/structure only - use the real numbers from DATA SUMMARY above, not these):
+"Namaste Suneeta ji! 🙏 Aapke pichle 15 din ka business analysis ready hai:
+
+📊 Aapki Sales Report:
+- Total Revenue: ₹[Amount]
+- Total Profit: ₹[Amount]
+
+🏆 Aapke Top Performers:
+- Sabse zyada bikne wala item [Top Item] raha.
+- Aapko sabse zyada profit [Top Category] se hua hai.
+
+💡 Sakhi ki Growth Tips:
+1. [Tip 1 related to top item] - Ise apne WhatsApp status par aur promote karein!
+2. [Tip 2 related to margins] - Festival season aa raha hai, toh in items ke combos banakar share karein.
+
+Kya aap kisi specific category ke baare mein aur details janna chahti hain?"
+
+You must output your response using the provided JSON schema. ui_text must be written in Hinglish following the structure above. tts_text must be a direct, word-for-word translation of that exact message into pure Devanagari script.
+In tts_text: never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी". Never use currency symbols like "₹" - always spell out the price followed by the word "रुपये" (e.g. "799 रुपये" instead of "₹799"). No markdown formatting (*, _, #) or emojis in tts_text - Devanagari and basic punctuation only.
 """
     result = generate_structured_with_fallback(growth_prompt, AgentResponse)
     reply_text = result.ui_text if result else ""
     reply_tts_text = result.tts_text if result else ""
 
     if not reply_text:
-        reply_text = f"Namaste {reseller_name} didi! Is hafte aapki sales ₹{analytics.get('sales_this_week_inr')} rahi aur profit ₹{analytics.get('profit_this_week_inr')} hai. Aap WhatsApp stories par kurtis share karke orders badha sakti hain!"
-        reply_tts_text = f"नमस्ते {reseller_name} दीदी! इस हफ्ते आपकी सेल्स {analytics.get('sales_this_week_inr')} रुपये रही और प्रॉफिट {analytics.get('profit_this_week_inr')} रुपये है। आप व्हाट्सएप स्टोरीज़ पर कुर्तियां शेयर करके ऑर्डर्स बढ़ा सकती हैं!"
+        if metrics["order_count"] == 0:
+            reply_text = f"Namaste {reseller_name} didi! Pichle {metrics['days']} din mein koi sales record nahi hui. Chaliye WhatsApp status aur groups par apne products promote karna shuru karte hain!"
+            reply_tts_text = f"नमस्ते {reseller_name} दीदी! पिछले {metrics['days']} दिन में कोई सेल्स रिकॉर्ड नहीं हुई। चलिए व्हाट्सएप स्टेटस और ग्रुप्स पर अपने प्रोडक्ट्स प्रमोट करना शुरू करते हैं!"
+        else:
+            reply_text = (
+                f"Namaste {reseller_name} didi! Pichle {metrics['days']} din ka business analysis: "
+                f"Total Revenue ₹{metrics['total_revenue']}, Total Profit ₹{metrics['total_profit']}. "
+                f"Sabse zyada bikne wala item {metrics['top_selling_item']} raha, aur sabse zyada profit "
+                f"{metrics['top_category']} category se hua. Ise WhatsApp status par aur promote karein!"
+            )
+            reply_tts_text = (
+                f"नमस्ते {reseller_name} दीदी! पिछले {metrics['days']} दिन का बिज़नेस एनालिसिस: "
+                f"टोटल रेवेन्यू {metrics['total_revenue']} रुपये, टोटल प्रॉफिट {metrics['total_profit']} रुपये। "
+                f"सबसे ज़्यादा बिकने वाला आइटम {metrics['top_selling_item']} रहा, और सबसे ज़्यादा प्रॉफिट "
+                f"{metrics['top_category']} केटेगरी से हुआ। इसे व्हाट्सएप स्टेटस पर और प्रमोट करें!"
+            )
 
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
-    
+
     latency = int((time.time() - t_start) * 1000)
     log_event = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1721,9 +1829,12 @@ Rules:
         "action": "Sales Coaching & Metrics Analysis",
         "latency_ms": latency,
         "data": {
-            "sales_recorded": analytics.get("sales_this_week_inr"),
-            "profit_recorded": analytics.get("profit_this_week_inr"),
-            "orders_processed": analytics.get("orders_count")
+            "requested_days": metrics["days"],
+            "total_revenue": metrics["total_revenue"],
+            "total_profit": metrics["total_profit"],
+            "top_selling_item": metrics["top_selling_item"],
+            "top_category": metrics["top_category"],
+            "order_count": metrics["order_count"]
         }
     }
     state["trace_logs"].append(log_event)
