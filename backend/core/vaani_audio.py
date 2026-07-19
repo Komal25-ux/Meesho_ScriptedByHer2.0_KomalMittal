@@ -115,16 +115,30 @@ async def convert_to_wav(input_file_path: str) -> str:
 
 _SARVAM_KEY_INDEX = 0
 
+def _get_sarvam_keys() -> list:
+    return [
+        k for k in [
+            settings.SARVAM_API_KEY,
+            settings.SARVAM_API_KEY_FALLBACK,
+            settings.SARVAM_API_KEY_FALLBACK_2,
+            settings.SARVAM_API_KEY_FALLBACK_3,
+            settings.SARVAM_API_KEY_FALLBACK_4,
+            settings.SARVAM_API_KEY_FALLBACK_5,
+            settings.SARVAM_API_KEY_FALLBACK_6
+        ]
+        if k and "YOUR_SARVAM" not in k
+    ]
+
 def get_sarvam_api_key() -> Optional[str]:
     global _SARVAM_KEY_INDEX
-    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    keys = _get_sarvam_keys()
     if not keys:
         return None
     return keys[_SARVAM_KEY_INDEX % len(keys)]
 
 def rotate_sarvam_key():
     global _SARVAM_KEY_INDEX
-    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    keys = _get_sarvam_keys()
     if keys:
         _SARVAM_KEY_INDEX = (_SARVAM_KEY_INDEX + 1) % len(keys)
         logger.info(f"Rotating Sarvam API Key index to: {_SARVAM_KEY_INDEX}")
@@ -135,7 +149,7 @@ async def transcribe_audio(file_path: str) -> str:
     1. Primary: Sarvam Saarika ASR API (with API key rotation on exhaustion/errors).
     2. Fallback: Google Gemini 2.5 Flash native audio transcription.
     """
-    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    keys = _get_sarvam_keys()
     num_keys = len(keys) if keys else 0
 
     if num_keys > 0:
@@ -203,7 +217,7 @@ async def synthesize_speech(text: str) -> bytes:
     1. Primary: Sarvam Bulbul TTS API (with key rotation on exhaustion/errors).
     2. Fallback: Returns empty bytes (handled in router by returning voice_fallback: true).
     """
-    keys = [k for k in [settings.SARVAM_API_KEY, settings.SARVAM_API_KEY_FALLBACK] if k and "YOUR_SARVAM" not in k]
+    keys = _get_sarvam_keys()
     num_keys = len(keys) if keys else 0
 
     if num_keys > 0:

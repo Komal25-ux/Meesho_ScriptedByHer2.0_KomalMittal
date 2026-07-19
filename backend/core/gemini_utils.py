@@ -147,9 +147,19 @@ T = TypeVar("T", bound=BaseModel)
 
 _CURRENT_KEY_INDEX = 0
 
+def _get_gemini_keys() -> list:
+    return [
+        k for k in [
+            settings.GEMINI_API_KEY,
+            settings.GEMINI_API_KEY_FALLBACK,
+            settings.GEMINI_API_KEY_FALLBACK_2
+        ]
+        if k and "YOUR_GEMINI" not in k
+    ]
+
 def configure_gemini() -> bool:
     global _CURRENT_KEY_INDEX
-    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    keys = _get_gemini_keys()
     if not keys:
         logger.error("No valid Gemini API keys found in settings.")
         return False
@@ -163,7 +173,7 @@ def configure_gemini() -> bool:
 
 def rotate_gemini_key():
     global _CURRENT_KEY_INDEX
-    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    keys = _get_gemini_keys()
     if keys:
         _CURRENT_KEY_INDEX = (_CURRENT_KEY_INDEX + 1) % len(keys)
         logger.info(f"Rotating Gemini API Key index to: {_CURRENT_KEY_INDEX}")
@@ -184,7 +194,7 @@ def _model_chain():
 def generate_with_fallback(parts):
     """Tries each model in the fallback chain in order. If all models fail due to
     quota exhaustion or invalid keys, rotates to the fallback API key and retries."""
-    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    keys = _get_gemini_keys()
     num_keys = len(keys) if keys else 1
     
     last_error = None
@@ -218,7 +228,7 @@ def generate_with_fallback(parts):
 def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[T]:
     """Same fallback chain and key rotation as generate_with_fallback, but
     constrains each model's output to the given Pydantic schema."""
-    keys = [k for k in [settings.GEMINI_API_KEY, settings.GEMINI_API_KEY_FALLBACK] if k and "YOUR_GEMINI" not in k]
+    keys = _get_gemini_keys()
     num_keys = len(keys) if keys else 1
     
     last_error = None
