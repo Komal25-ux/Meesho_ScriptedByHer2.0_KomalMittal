@@ -321,6 +321,22 @@ export default function App() {
     }
   };
 
+  // Product card tap handler (see ProductGrid.jsx). Wraps the tapped
+  // product's exact name in a mode-specific trigger phrase instead of
+  // sending the bare name, which the backend's LLM classifier had no verb/
+  // intent signal to route confidently (see detect_intent in
+  // orchestrator.py, which now matches these two exact phrases
+  // deterministically before falling back to the LLM). A fresh
+  // disambiguation-picker tap still resolves correctly too - orchestrator.py's
+  // check_pending_selection and the agent nodes strip this same prefix back
+  // off before doing their exact-name lookup.
+  const handleProductCardClick = (productName) => {
+    const triggerPhrase = activeMode === 'reseller'
+      ? `Ye item WhatsApp group mein share karna hai: ${productName}`
+      : `Mujhe ye wala item pasand hai, iski details batao: ${productName}`;
+    handleSendMessage(triggerPhrase);
+  };
+
   // Audio blob send handler
   const handleSendAudio = async (audioBlob) => {
     if (isLoading) return;
@@ -542,7 +558,7 @@ export default function App() {
           {/* Scrollable messages zone */}
           <div className="flex-1 p-4 overflow-y-auto bg-slate-50 space-y-4">
             {currentMessages.map((msg, index) => (
-              <MessageBubble key={index} message={msg} onSelectProduct={handleSendMessage} />
+              <MessageBubble key={index} message={msg} onSelectProduct={handleProductCardClick} />
             ))}
             <div ref={chatEndRef} />
           </div>
