@@ -192,3 +192,35 @@ ALTER TABLE returns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE product_embeddings ENABLE ROW LEVEL SECURITY;
+
+-- 12. Performance Indexes
+-- Every table's own UUID PK and any UNIQUE constraint above (whatsapp_number,
+-- product_id) already have an implicit index - these are the additional ones
+-- backend/db/supabase_client.py's actual query patterns need but don't get
+-- for free. Idempotent/safe to re-run.
+
+-- get_active_listings/is_product_listed/get_listing_id all filter
+-- listings by (reseller_id, is_active) together - a composite index matches
+-- that WHERE shape directly (and still serves reseller_id-only lookups via
+-- the leftmost-prefix rule).
+CREATE INDEX IF NOT EXISTS idx_listings_reseller_active
+  ON listings(reseller_id, is_active);
+
+-- get_weekly_analytics filters orders by reseller_id alone.
+CREATE INDEX IF NOT EXISTS idx_orders_reseller_id
+  ON orders(reseller_id);
+
+-- get_conversation_history filters by reseller_id AND sorts by created_at
+-- DESC with a LIMIT - the composite index matches both the filter and the
+-- sort, avoiding a separate sort step after the scan.
+CREATE INDEX IF NOT EXISTS idx_conversations_reseller_created
+  ON conversations(reseller_id, created_at DESC);
+
+-- match_products' RPC does a `<=>` (cosine distance) ORDER BY over every row
+-- with no index today, i.e. a full sequential scan + distance calc per
+-- query - fine at this catalog's current size, but grows linearly worse as
+-- it does. HNSW (vector_cosine_ops, matching the `<=>` operator used in the
+-- RPC) needs no upfront training step unlike ivfflat, so it's safe to create
+-- even on a small/empty table and stays effective as the catalog grows.
+CREATE INDEX IF NOT EXISTS idx_product_embeddings_embedding_hnsw
+  ON product_embeddings USING hnsw (embedding vector_cosine_ops);
