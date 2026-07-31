@@ -133,6 +133,20 @@ class SupabaseDB:
             logger.error(f"Error in is_product_listed: {e}")
             return False
 
+    def get_listing_id(self, reseller_id: str, product_id: str) -> Optional[str]:
+        """Resolve this reseller's own active listing row id for a product, if
+        any - the FK save_order needs for orders.listing_id. Returns None for
+        an unlisted product rather than raising, since a confirmed order can
+        legitimately happen before the reseller has listed the item."""
+        if self.is_mock():
+            return "mock-listing-id" if product_id == "SKU_001" else None
+        try:
+            res = self.client.table("listings").select("id").eq("reseller_id", reseller_id).eq("product_id", product_id).eq("is_active", True).limit(1).execute()
+            return res.data[0]["id"] if res.data else None
+        except Exception as e:
+            logger.error(f"Error in get_listing_id: {e}")
+            return None
+
     def save_order(self, order_data: dict) -> dict:
         """Save a transaction order."""
         if self.is_mock():

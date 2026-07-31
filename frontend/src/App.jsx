@@ -56,6 +56,12 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
 
+  // Products the reseller has listed via chat this session, keyed by name -
+  // handed to CatalogDashboard so a listing that has never appeared in the
+  // 60-day mock sales history (a genuinely new-to-Past-Orders product) shows
+  // up there too, at the price just set, with 0 profit/units sold so far.
+  const [newListings, setNewListings] = useState([]);
+
   const markNotificationRead = (id) => {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
     setIsNotifOpen(false);
@@ -152,46 +158,62 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [currentMessages]);
 
-  // Connect to WebSocket on startup
+  // Connect to WebSocket on startup. Guarded against React 18 StrictMode's
+  // dev-only double-invoke of effects (mount -> cleanup -> mount again):
+  // without isStopped/reconnectTimer, the simulated first mount's socket and
+  // the real second mount's socket raced on the shared wsRef, and the
+  // orphaned reconnect timer from the "cleaned up" first attempt kept firing
+  // after that closed socket's onclose, opening yet another socket - an
+  // endless connect/error/reconnect loop that only ever showed up in `npm
+  // run dev` (StrictMode's effect double-invoke never happens in a
+  // production build), never in the deployed app.
   useEffect(() => {
-    connectWebSocket();
+    let isStopped = false;
+    let reconnectTimer = null;
+
+    const connect = () => {
+      if (isStopped) return;
+      try {
+        logger_info("Connecting WebSocket: " + `${WS_BASE_URL}/ws/agent-logs`);
+        const socket = new WebSocket(`${WS_BASE_URL}/ws/agent-logs`);
+        wsRef.current = socket;
+
+        socket.onmessage = (event) => {
+          try {
+            const logData = JSON.parse(event.data);
+            setTraceLogs((prev) => [...prev, logData]);
+
+            // Trigger confetti if a catalog listing was added successfully
+            if (logData.agent === 'CatalogAgent' && logData.data?.promo_post_created) {
+              triggerConfetti();
+            }
+          } catch (e) {
+            console.error("Error parsing WebSocket log:", e);
+          }
+        };
+
+        socket.onclose = () => {
+          if (isStopped) return;
+          console.warn("WebSocket closed. Attempting reconnect in 5 seconds...");
+          reconnectTimer = setTimeout(connect, 5000);
+        };
+
+        socket.onerror = (err) => {
+          console.error("WebSocket error:", err);
+        };
+      } catch (err) {
+        console.error("WebSocket connection failure:", err);
+      }
+    };
+
+    connect();
+
     return () => {
+      isStopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) wsRef.current.close();
     };
   }, []);
-
-  const connectWebSocket = () => {
-    try {
-      logger_info("Connecting WebSocket: " + `${WS_BASE_URL}/ws/agent-logs`);
-      const socket = new WebSocket(`${WS_BASE_URL}/ws/agent-logs`);
-      wsRef.current = socket;
-
-      socket.onmessage = (event) => {
-        try {
-          const logData = JSON.parse(event.data);
-          setTraceLogs((prev) => [...prev, logData]);
-          
-          // Trigger confetti if a catalog listing was added successfully
-          if (logData.agent === 'CatalogAgent' && logData.data?.promo_post_created) {
-            triggerConfetti();
-          }
-        } catch (e) {
-          console.error("Error parsing WebSocket log:", e);
-        }
-      };
-
-      socket.onclose = () => {
-        console.warn("WebSocket closed. Attempting reconnect in 5 seconds...");
-        setTimeout(connectWebSocket, 5000);
-      };
-
-      socket.onerror = (err) => {
-        console.error("WebSocket error:", err);
-      };
-    } catch (err) {
-      console.error("WebSocket connection failure:", err);
-    }
-  };
 
   const logger_info = (msg) => {
     console.log(`[Sakhi UI] ${msg}`);
@@ -218,6 +240,12 @@ export default function App() {
       audio: data.broadcast_audio || null,
       voice_fallback: !data.broadcast_audio
     }]);
+    if (data.listing_product_name) {
+      setNewListings((prev) => [
+        ...prev.filter((p) => p.name !== data.listing_product_name),
+        { name: data.listing_product_name, category: data.listing_category, price: data.price }
+      ]);
+    }
   };
 
   // Bridges a terminal Customer-segment outcome (order confirmed, or a
@@ -228,6 +256,10 @@ export default function App() {
       setNotifications((prev) => [
         {
           id: Date.now(),
+          // Definitive backend order record this notification was read back
+          // from (see save_order in orchestrator.py) - kept for traceability,
+          // not just the locally-generated `id` above used as the React key.
+          order_id: data.order_id || null,
           type: 'order',
           customer: 'Payal',
           product: data.confirmed_product_name || 'item',
@@ -647,7 +679,7 @@ export default function App() {
                 <TerminalTraceLog logs={traceLogs} onClear={() => setTraceLogs([])} />
               </div>
             ) : activeTab === 'catalog' ? (
-              <CatalogDashboard />
+              <CatalogDashboard newListings={newListings} />
             ) : (
               <GrowthDashboard />
             )}

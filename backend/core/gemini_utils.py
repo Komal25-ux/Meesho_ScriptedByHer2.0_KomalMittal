@@ -82,6 +82,15 @@ class CustomerAgentResponse(AgentResponse):
         "rejects Pydantic Field 'default' metadata outright ('Unknown field for Schema: default'), which "
         "silently fails every model in the fallback chain and returns None."
     ))
+    grounded_via_recent_item: bool = Field(description=(
+        "True ONLY for Rule 3b (Pronoun Fallback to Recently Discussed Item): the query referred to a "
+        "product using only a pronoun/demonstrative with no product-specific words of its own (e.g. 'iska "
+        "size kya hai?', 'ismein aur colors hain?'), so you answered from RECENTLY DISCUSSED ITEM instead of "
+        "this turn's own CONTEXT. False for every other case, including Rule 3's direct Success Case (CONTEXT "
+        "itself resolved to exactly one item), Priority 1/1.5/2, and Rules 2/4 - with no exceptions. Read by "
+        "the orchestrator to know THIS turn's own product search may be noise (not a real reference) and must "
+        "not be trusted for the reply's image - only RECENTLY DISCUSSED ITEM's own image is safe to attach."
+    ))
 
 class ReturnsAgentResponse(AgentResponse):
     """Returns-agent-specific dual output. Whitelist Condition 3 for images:

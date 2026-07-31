@@ -50,6 +50,19 @@ PENDING_SELECTIONS: Dict[str, Dict[str, Any]] = {}
 # turn's own search can't provide one.
 LAST_VIEWED_PRODUCT: Dict[str, Dict[str, Any]] = {}
 
+# One-shot flag: true for exactly the customer's VERY NEXT message after a
+# reseller listing is finalized and broadcast into the Customer segment (see
+# finalize_catalog_listing), false/absent every other turn. Backs the
+# "Latest Context Lock": check_fresh_context_lock pops this (so it can never
+# fire twice for the same broadcast) and, if this one message shows buying/
+# detail interest, deterministically answers using the just-broadcast product
+# instead of letting detect_intent's classifier or a fresh vector search
+# route it into the ambiguous-match picker - the "reseller posts an item,
+# customer immediately says 'I want to buy' and gets shown unrelated
+# alternatives instead" bug. Keyed exactly like LAST_VIEWED_PRODUCT (in fact
+# always set alongside it), so it only ever applies to the Customer segment.
+FRESH_BROADCAST_LOCK: Dict[str, bool] = {}
+
 # Deterministic Product Card Click triggers (see handleProductCardClick in
 # App.jsx) - a mode-aware wrapper the frontend sends instead of a bare
 # product name whenever ANY product card is tapped (a fresh ambiguous-match
@@ -435,6 +448,8 @@ class SakhiState(TypedDict):
     pending_return_route: str
     # ProductGrid picker routing (transient, not persisted)
     pending_selection_route: str
+    # Latest Context Lock routing (transient, not persisted)
+    context_lock_route: str
 
     # Processing outputs
     reply_text: str
@@ -459,11 +474,25 @@ class SakhiState(TypedDict):
     listing_finalized: bool
     listing_broadcast_caption: Optional[str]
     listing_broadcast_caption_tts: Optional[str]
+    # Clean, unparsed product identity for the listing finalized this turn -
+    # reply_text only has this baked into markdown prose ("Ho gaya Didi!
+    # *{name}* ..."), which is fine for display but not something the
+    # frontend should have to scrape back out to know which product/category
+    # just went live (e.g. to reflect a brand-new-to-Past-Orders SKU in the
+    # Catalog dashboard with its just-set price and 0 sales so far).
+    listing_product_name: Optional[str]
+    listing_category: Optional[str]
 
     # Set when this turn confirmed a customer purchase (Priority 2 in
     # run_customer_agent), so the API layer can surface it to the Reseller
     # segment's Notification Bell.
     reply_purchase_intent_detected: bool
+    # The persisted orders.id this turn's confirmation was written to - see
+    # run_customer_agent's Priority 2 handler. The three fields below are
+    # read back from that same saved row, never re-derived from session
+    # state afterward, so the reseller notification can never drift from
+    # what was actually confirmed and stored at checkout.
+    reply_order_id: Optional[str]
     reply_confirmed_product_name: Optional[str]
     reply_confirmed_product_price: Optional[int]
     reply_confirmed_product_is_unlisted: Optional[bool]
@@ -681,6 +710,151 @@ def check_pending_selection(state: SakhiState) -> SakhiState:
 
 def route_pending_selection(state: SakhiState) -> str:
     return state.get("pending_selection_route", "not_pending")
+
+class BuyingInterestIntent(BaseModel):
+    interested: bool
+
+def classify_buying_interest(user_input: str, product_name: str) -> bool:
+    """Backs the Latest Context Lock (see FRESH_BROADCAST_LOCK): broader than
+    Priority 2's strict purchase-confirmation classifier in run_customer_agent,
+    since a customer's very first reaction to a just-posted product ("I want
+    to buy", "details bhejo", "kitne ka hai") is high interest, not yet a
+    checkout confirmation - but it still deserves to bind straight to that
+    product, not fall through to a fresh ambiguous-match search. Only decides
+    whether THIS message is about the just-posted product at all; false
+    correctly lets an unrelated first reply (a greeting, a return, a totally
+    different category) fall through to normal intent detection instead of
+    being force-bound to it."""
+    prompt = f"""A product was just posted/shared with a customer on WhatsApp:
+Product: {product_name}
+
+Their very next message was: "{user_input}"
+
+Does this message show interest in buying, ordering, or getting details/price about THIS product (e.g.
+"I want to buy", "details do", "price kya hai", "haan bhejo", "interested hu", "order kar do", "kitne ka
+hai")? Answer false if the message is clearly about something unrelated - a different product/category, a
+return/complaint, a greeting, or an unrelated topic.
+
+Output ONLY valid JSON: {{"interested": true|false}}"""
+    raw_text = generate_with_fallback(prompt)
+    if raw_text:
+        try:
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            parsed = BuyingInterestIntent(**json.loads(cleaned))
+            return parsed.interested
+        except (json.JSONDecodeError, ValidationError, KeyError) as e:
+            logger.warning(f"Buying interest classification failed to parse ({e}); using keyword fallback.")
+
+    # Emergency fallback only - used if Gemini is entirely unreachable.
+    lower = user_input.strip().lower()
+    return any(k in lower for k in [
+        "buy", "khareed", "chahiye", "order", "price", "detail", "kitne", "interested",
+        "lena", "le lo", "de do", "bhejo", "haan", "chalega", "milega", "available"
+    ])
+
+# ── NODE 1.75: CHECK FRESH BROADCAST CONTEXT LOCK (Latest Context Lock) ──
+def check_fresh_context_lock(state: SakhiState) -> SakhiState:
+    """Intercepts exactly the customer's next message after a reseller
+    listing was just finalized/broadcast (see FRESH_BROADCAST_LOCK /
+    finalize_catalog_listing), so a natural first reaction ("I want to buy",
+    "details") binds deterministically to that product instead of running
+    through detect_intent's classifier and a fresh vector search - which,
+    having no product-specific words of its own, would otherwise commonly
+    land on the ambiguous-match picker and show unrelated alternatives
+    instead of the item that was just posted.
+
+    One-shot by construction: FRESH_BROADCAST_LOCK is popped unconditionally
+    the first time this runs after a broadcast, whether or not the message
+    actually turns out to show buying interest - so only the very next
+    message ever gets this treatment, exactly as required."""
+    t_start = time.time()
+    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
+    active_mode = state.get("active_mode", "reseller")
+    raw_input = state.get("raw_input", "")
+
+    session_key = _pending_key(whatsapp_number, active_mode)
+    locked = active_mode == "customer" and FRESH_BROADCAST_LOCK.pop(session_key, False)
+    locked_product = LAST_VIEWED_PRODUCT.get(session_key) if locked else None
+
+    if not locked_product or not raw_input or not classify_buying_interest(raw_input, locked_product.get("name", "")):
+        state["context_lock_route"] = "not_locked"
+        return state
+
+    product_line = _format_product_line(locked_product)
+    lock_prompt = f"""# System Persona & Core Objective
+You are 'Customer Didi', a polite AI customer support assistant for a Hindi-speaking Meesho reseller. A
+product was JUST posted/shared into this customer's chat, and the message below is their very first reply
+right after seeing it.
+
+PRODUCT JUST SHARED (the ONLY product relevant to this turn - never consider or search for any other item):
+{product_line}
+
+CUSTOMER'S MESSAGE: "{raw_input}"
+
+This message shows buying interest in / a request for details about the product just shared. Respond by:
+1. Warmly confirming/describing the item, grounded ONLY in the product above.
+2. Stating the price clearly in both ui_text and tts_text.
+3. Asking if they'd like you to place the order (e.g. "Kya main aapke liye iska order place kar doon?").
+
+Set answered_from_product_context to true, grounded_via_recent_item to true, return_retention_triggered to
+false, and purchase_intent_detected to false - this is high interest, not yet a confirmed order. If they
+confirm on their NEXT message, that is handled separately.
+
+# Phonetic & Formatting Guidelines for TTS
+- Never use currency symbols like '₹' or 'Rs.' - always spell out the number followed by 'रुपये'.
+- Never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी".
+- tts_text must be a direct translation of ui_text into pure Devanagari script.
+- Keep responses strictly under 2 short sentences.
+
+# Output
+You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context,
+return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
+"""
+    result = generate_structured_with_fallback(lock_prompt, CustomerAgentResponse)
+
+    fallback_ui = (
+        f"Ji, *{locked_product.get('name')}* abhi hi post hua hai - price ₹{locked_product.get('suggested_selling_price_inr')} hai. "
+        f"Kya main aapke liye iska order place kar doon?"
+    )
+    fallback_tts = (
+        f"जी, {locked_product.get('name')} अभी ही पोस्ट हुआ है, प्राइस {locked_product.get('suggested_selling_price_inr')} रुपये है। "
+        f"क्या मैं आपके लिए इसका ऑर्डर प्लेस कर दूं?"
+    )
+
+    state["reply_text"] = result.ui_text if result and result.ui_text else fallback_ui
+    state["reply_tts_text"] = result.tts_text if result and result.tts_text else fallback_tts
+    state["reply_image_url"] = locked_product.get("base_image_url")
+    state["reply_product_options"] = None
+    state["context_lock_route"] = "handled"
+
+    # Keeps the customer grounded on this item for a follow-up confirmation
+    # ("haan", "order kar do") exactly like any other Success Case turn.
+    LAST_VIEWED_PRODUCT[session_key] = locked_product
+
+    latency = int((time.time() - t_start) * 1000)
+    log_event = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent": "CustomerAgent",
+        "action": "Latest Context Lock - Bound to Just-Posted Product",
+        "latency_ms": latency,
+        "data": {"product_name": locked_product.get("name"), "trigger_text": raw_input}
+    }
+    state["trace_logs"].append(log_event)
+    db_client.log_agent_event({
+        "session_id": whatsapp_number,
+        "event_type": "fresh_context_lock",
+        "agent_name": "CustomerAgent",
+        "latency_ms": latency,
+        "payload": log_event["data"]
+    })
+    return state
+
+def route_fresh_context_lock(state: SakhiState) -> str:
+    return state.get("context_lock_route", "not_locked")
 
 _RETURNS_STAGE_LABELS = {
     "A": "SCENARIO A - Hard Return",
@@ -1349,6 +1523,8 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     state["listing_finalized"] = True
     state["listing_broadcast_caption"] = listing_payload["whatsapp_caption"]
     state["listing_broadcast_caption_tts"] = pending.get("whatsapp_caption_tts", listing_payload["whatsapp_caption"])
+    state["listing_product_name"] = listing_payload["product_name"]
+    state["listing_category"] = listing_payload["category"]
 
     # Seed the CUSTOMER segment's RECENTLY DISCUSSED ITEM (LAST_VIEWED_PRODUCT)
     # with the product that was just posted - broadcastListingToCustomers in
@@ -1370,6 +1546,9 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
             **matched_product,
             "suggested_selling_price_inr": pending["selling_price"],
         }
+        # Arms the Latest Context Lock for exactly the customer's next message
+        # - see FRESH_BROADCAST_LOCK's docstring above.
+        FRESH_BROADCAST_LOCK[customer_session_key] = True
 
     latency = int((time.time() - t_start) * 1000)
     log_event = {
@@ -1395,6 +1574,163 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
 
 CUSTOMER_ZERO_HALLUCINATION_REFUSAL = "Maaf kijiyega, mere pas abhi iski detail nahi hai. Mai Didi se puch kar batati hu."
 CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS = "माफ़ कीजिएगा, मेरे पास अभी इसकी डिटेल नहीं है. मैं दीदी से पूछ कर बताती हूँ."
+
+# Exact closing question appended to every Drill-Down State reply (Rule 3b -
+# see customer_prompt) - guaranteed in Python, not left to the model alone,
+# same reasoning as every other hard-mandated string in this file: a canned
+# constant can't be dropped by an off-spec generation.
+DRILL_DOWN_CTA = "kya isse order kar dun?"
+DRILL_DOWN_CTA_TTS = "क्या इसे ऑर्डर कर दूं?"
+
+# Renders one product dict as a single grounding line for an LLM prompt -
+# shared by run_customer_agent's own CONTEXT/RECENTLY DISCUSSED ITEM blocks
+# and check_fresh_context_lock's Latest Context Lock reply, so both ground
+# strictly on the same real product fields (never inventing one).
+def _format_product_line(p: Dict[str, Any]) -> str:
+    return (
+        f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
+        f"Category: {p.get('category')} | "
+        f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
+        f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
+        f"Material: {p.get('material') or 'Not specified'} | "
+        f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
+    )
+
+class AttributeFollowupIntent(BaseModel):
+    is_followup: bool
+
+def classify_attribute_followup(user_input: str, product_name: str) -> bool:
+    """Deterministic Drill-Down gate for run_customer_agent, checked BEFORE
+    category extraction / vector search even run (see the call site). This
+    exists because leaving the decision to the main customer_prompt's Rule 3b
+    was not reliable in practice: a bare attribute word next to a category
+    name (e.g. "suit ka size kya hai") can make extract_category_intent
+    misread it as a fresh category browse, populating CONTEXT with several
+    unrelated same-category products BEFORE the main LLM call ever gets a
+    chance to recognize this was actually about the one item already
+    established - resurfacing the ambiguous-match picker instead of just
+    answering. Running this cheap, narrowly-scoped check first, using ONLY
+    the established product's name (never a fresh search), avoids that
+    entirely."""
+    prompt = f"""A customer was just discussing this product: "{product_name}"
+
+Their next message was: "{user_input}"
+
+Is this message a QUESTION asking about an ATTRIBUTE of THIS SAME product - size, color, material,
+fabric, price, availability, or return/exchange policy (e.g. "size kya hai", "colors kya hain", "kitne ka
+hai", "cotton hai kya", "return ho sakta hai kya", "kaunse sizes available hain") - without naming any
+different/new product or category?
+
+Answer false for all of these: a request to browse/see a different item or category (e.g. "kurti dikhao",
+"aur options dikhao"), a purchase confirmation (e.g. "order kar do", "ye lena hai"), a COMPLAINT or
+dissatisfaction about size/fit/color/quality (e.g. "size chota hai", "color pasand nahi aaya" - these are
+returns, not inquiries), a greeting, or anything unrelated to this specific product's attributes.
+
+Output ONLY valid JSON: {{"is_followup": true|false}}"""
+    raw_text = generate_with_fallback(prompt)
+    if raw_text:
+        try:
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            parsed = AttributeFollowupIntent(**json.loads(cleaned))
+            return parsed.is_followup
+        except (json.JSONDecodeError, ValidationError, KeyError) as e:
+            logger.warning(f"Attribute follow-up classification failed to parse ({e}); using keyword fallback.")
+
+    # Emergency fallback only - used if Gemini is entirely unreachable.
+    # Deliberately excludes "return"/"exchange" here: a keyword-only check
+    # can't reliably tell "return ho sakta hai kya" (an inquiry) apart from
+    # "return karna hai" (a genuine return request that Priority 1 must still
+    # catch), so during a total outage this stays conservative and lets those
+    # fall through to the normal flow instead of risking a swallowed return.
+    lower = user_input.strip().lower()
+    complaint_words = ["chota", "bada", "tight", "loose", "kharab", "phata", "pasand nahi", "achha nahi"]
+    if any(w in lower for w in complaint_words):
+        return False
+    attribute_words = ["size", "colour", "color", "rang", "material", "fabric", "kapda", "price", "kimat", "kitne ka", "available", "stock"]
+    return any(w in lower for w in attribute_words)
+
+def _answer_established_item_followup(
+    state: SakhiState, product: Dict[str, Any], user_input: str,
+    session_key: str, whatsapp_number: str, t_start: float
+) -> SakhiState:
+    """Deterministic Drill-Down State reply (see classify_attribute_followup's
+    call site in run_customer_agent) - grounds strictly on `product` (the
+    established RECENTLY DISCUSSED ITEM), never runs a fresh vector search,
+    never attaches an image (Action A - media suppressed regardless of
+    whether it would've been correct), and always closes with the mandated
+    sale-prompt CTA (Action B), enforced in Python as a hard guarantee, not
+    left to the model alone."""
+    product_line = _format_product_line(product)
+    prompt = f"""# System Persona & Core Objective
+You are 'Customer Didi', a polite AI customer support assistant for a Hindi-speaking Meesho reseller. The
+customer is asking a follow-up question about a product they were already just discussing.
+
+ESTABLISHED PRODUCT (the ONLY product relevant to this turn - do not consider or search for any other item):
+{product_line}
+
+CUSTOMER'S FOLLOW-UP QUESTION: "{user_input}"
+
+Answer their specific question directly and warmly, grounded ONLY in the product above (e.g. if they asked
+about size, clearly state the available sizes; if a specific attribute is genuinely absent from the product
+data above, say so rather than guessing). Do not re-describe the whole product unless asked. Your reply
+MUST end with the exact closing question: "{DRILL_DOWN_CTA}"
+
+# Phonetic & Formatting Guidelines for TTS
+- Never use currency symbols like '₹' or 'Rs.' - always spell out the number followed by 'रुपये'.
+- Never write "AI Sakhi" - always spell it phonetically in Devanagari as "ए आई सखी".
+- tts_text must be a direct translation of ui_text into pure Devanagari script, and must end with the
+  Devanagari equivalent of the closing question: "{DRILL_DOWN_CTA_TTS}"
+- Keep responses strictly under 2 short sentences plus the mandated closing question.
+
+# Output
+Set answered_from_product_context to true, grounded_via_recent_item to true, return_retention_triggered to
+false, and purchase_intent_detected to false.
+You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context,
+return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
+"""
+    result = generate_structured_with_fallback(prompt, CustomerAgentResponse)
+
+    sizes = ', '.join(product.get('sizes') or []) or 'abhi update nahi hui hai'
+    fallback_ui = f"Iske available sizes hain: {sizes}. {DRILL_DOWN_CTA}"
+    fallback_tts = f"इसके उपलब्ध साइज़ हैं: {sizes}. {DRILL_DOWN_CTA_TTS}"
+
+    reply_text = result.ui_text if result and result.ui_text else fallback_ui
+    reply_tts_text = result.tts_text if result and result.tts_text else fallback_tts
+
+    if DRILL_DOWN_CTA.lower() not in reply_text.lower():
+        reply_text = f"{reply_text.rstrip()} {DRILL_DOWN_CTA}"
+    if DRILL_DOWN_CTA_TTS not in reply_tts_text:
+        reply_tts_text = f"{reply_tts_text.rstrip()} {DRILL_DOWN_CTA_TTS}"
+
+    state["reply_text"] = reply_text
+    state["reply_tts_text"] = reply_tts_text
+    state["reply_image_url"] = None
+    state["reply_product_options"] = None
+
+    # Keeps the item grounded for a further follow-up or a confirmation next turn.
+    LAST_VIEWED_PRODUCT[session_key] = product
+
+    latency = int((time.time() - t_start) * 1000)
+    log_event = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent": "CustomerAgent",
+        "action": "Drill-Down Follow-up on Established Item",
+        "latency_ms": latency,
+        "data": {"product_name": product.get("name"), "trigger_text": user_input}
+    }
+    state["trace_logs"].append(log_event)
+    db_client.log_agent_event({
+        "session_id": whatsapp_number,
+        "event_type": "customer_drill_down_followup",
+        "agent_name": "CustomerAgent",
+        "latency_ms": latency,
+        "payload": log_event["data"]
+    })
+    return state
 
 # ── NODE 4: CUSTOMER AGENT (RAG BASED) ────────────────────────
 def run_customer_agent(state: SakhiState) -> SakhiState:
@@ -1424,6 +1760,22 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     # vector search below, which could resurface the same cluster of
     # similarly-named SKUs and show the picker again.
     exact_match = db_client.get_product_by_name(user_input)
+
+    # Deterministic Drill-Down short-circuit: decided BEFORE category
+    # extraction / vector search even run, so a noisy or misclassified
+    # CONTEXT never gets the chance to derail an attribute follow-up ("size
+    # kya hai", "colors kya hain") about the item the customer is ALREADY
+    # looking at into the ambiguous-match picker - see
+    # classify_attribute_followup's docstring for why this can't just be left
+    # to the main prompt's Rule 3b. Skipped for a fresh exact-name match or a
+    # Product Card Click - those are legitimate new/first identifications,
+    # not a follow-up on an established item.
+    if not exact_match and not is_details_trigger:
+        early_recent_product = LAST_VIEWED_PRODUCT.get(session_key)
+        if early_recent_product and classify_attribute_followup(user_input, early_recent_product.get("name", "")):
+            return _answer_established_item_followup(
+                state, early_recent_product, user_input, session_key, whatsapp_number, t_start
+            )
 
     category_filter = None
     if exact_match:
@@ -1536,16 +1888,6 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
             dynamic_price = max(price_min_profit, price_30_margin)
             recent_product["suggested_selling_price_inr"] = dynamic_price
 
-    def _format_product_line(p: Dict[str, Any]) -> str:
-        return (
-            f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
-            f"Category: {p.get('category')} | "
-            f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
-            f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
-            f"Material: {p.get('material') or 'Not specified'} | "
-            f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
-        )
-
     context_str = "\n".join(_format_product_line(p) for p in similar_skus) if similar_skus \
         else "No matching product found in the catalog for this query."
 
@@ -1590,6 +1932,7 @@ tts_text: "ओह! माफ़ कीजियेगा की प्रोड�
 answered_from_product_context: false
 return_retention_triggered: true
 purchase_intent_detected: false
+grounded_via_recent_item: false
 
 ## Priority 1.5: Product Card Click (High Purchase Interest)
 Trigger: PRODUCT_CARD_CLICK below is true. This means the customer tapped a specific product card to see its details - a strong, explicit signal of high interest, distinct from both a generic browsing question and an actual purchase confirmation (that's Priority 2, which this is NOT - it's a details request, not a confirmed order yet).
@@ -1597,7 +1940,7 @@ Action:
 1. Give a short, warm Hinglish description of the item, grounded ONLY in CONTEXT below (same zero-hallucination rule as Product Query Handling).
 2. State the final price clearly, in both ui_text and tts_text.
 3. Explicitly ask if they want to place the order (e.g. "Kya main aapke liye iska order place kar doon?").
-Set answered_from_product_context to true, return_retention_triggered to false, and purchase_intent_detected to false - this turn is high interest, not yet a confirmed order. If the customer confirms on their NEXT message (e.g. "haan", "order kar do"), Priority 2 below handles that turn using RECENTLY DISCUSSED ITEM (this item will already be remembered there once this turn completes).
+Set answered_from_product_context to true, return_retention_triggered to false, purchase_intent_detected to false, and grounded_via_recent_item to false (this is a fresh identification via the card tapped, not a recall of an older item) - this turn is high interest, not yet a confirmed order. If the customer confirms on their NEXT message (e.g. "haan", "order kar do"), Priority 2 below handles that turn using RECENTLY DISCUSSED ITEM (this item will already be remembered there once this turn completes).
 
 PRODUCT_CARD_CLICK: {'true' if is_details_trigger else 'false'}
 
@@ -1625,6 +1968,7 @@ tts_text: "आप कौनसी वाली कन्फर्म करन�
 answered_from_product_context: false
 return_retention_triggered: false
 purchase_intent_detected: false
+grounded_via_recent_item: false
 
 If (a) AND (b) both hold: you cannot complete financial transactions. Do NOT describe or search for the product again. Bypass the RAG context rules below entirely and hand off the order to the human reseller.
 You MUST output EXACTLY:
@@ -1633,6 +1977,7 @@ tts_text: "जी ज़रूर! आपका ऑर्डर कन्फर�
 answered_from_product_context: false
 return_retention_triggered: false
 purchase_intent_detected: true
+grounded_via_recent_item: false
 
 # Product Query Handling (Strict RAG Rules)
 Only if Priority 1 and Priority 2 above do NOT apply, answer based ONLY on the provided context below.
@@ -1644,10 +1989,10 @@ USER QUERY:
 "{user_input}"
 
 1. Factual Constraints: Do not invent attributes outside CONTEXT or RECENTLY DISCUSSED ITEM (whichever grounds the answer per the rules below). A product appearing there means it EXISTS and IS AVAILABLE - a general availability question ("kya ye milegi?") is answered as long as a matching product is available; do not treat availability itself as a missing detail.
-2. Browsing Case (General/Exploratory Query, 2+ Candidates): If the query is a general browsing request rather than a question about one specific, already-identified item (e.g. "saree dikhao", "kuch achi kurti dikhao", "kya options hain") AND CONTEXT lists 2 or more candidate products, do NOT try to describe or compare all of them yourself in ui_text/tts_text - even though you technically could. The system will show them to the customer as a visual picker instead, which they can tap directly; a wall of text listing multiple names/prices is worse UX than that picker and defeats its purpose. In this case ui_text/tts_text can be a brief one-line acknowledgement (it will likely be replaced by the picker anyway). Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false. This does NOT apply when rule 3b below resolves the query to RECENTLY DISCUSSED ITEM instead - a pronoun referring to a known item is never a fresh browsing request, no matter how many loose/unrelated matches this message's own CONTEXT happens to contain.
-3. Success Case (Single Specific Item): Only when CONTEXT effectively resolves to ONE relevant item (either exactly one product in CONTEXT, or the query clearly asks about one specific item even if a second loosely-related product is also present in CONTEXT) do you answer directly. Answer warmly. You MUST state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"). Set answered_from_product_context to true, return_retention_triggered to false, and purchase_intent_detected to false.
-3b. Pronoun Fallback to Recently Discussed Item: The query may refer to a product using only a pronoun/demonstrative and no product-specific words at all (e.g. "iska size kya hai?", "ismein aur colors hain?", "is it available in blue?", "what sizes are available in this?"). A query like that has nothing for its own CONTEXT above to match against, so CONTEXT will usually be empty or a noisy, unrelated set of loose matches - the same situation Priority 2's condition (b) above already handles for purchase confirmations. Apply the identical resolution here: if RECENTLY DISCUSSED ITEM above is present (it says "None." when it is not), treat IT as the grounding item for this Success Case and answer from its attributes, instead of falling through to the Browsing Case or refusing for lack of context. Do NOT trigger a broad catalog search or picker just because this message's own CONTEXT was empty/ambiguous - a known pronoun referring to an already-shared/posted item always takes priority over that. This only applies while the pronoun genuinely points at RECENTLY DISCUSSED ITEM; if the query names a different/new product or category, resolve normally instead.
-4. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from both CONTEXT and RECENTLY DISCUSSED ITEM (whichever grounded the answer), do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false, return_retention_triggered to false, and purchase_intent_detected to false.
+2. Browsing Case (General/Exploratory Query, 2+ Candidates): If the query is a general browsing request rather than a question about one specific, already-identified item (e.g. "saree dikhao", "kuch achi kurti dikhao", "kya options hain") AND CONTEXT lists 2 or more candidate products, do NOT try to describe or compare all of them yourself in ui_text/tts_text - even though you technically could. The system will show them to the customer as a visual picker instead, which they can tap directly; a wall of text listing multiple names/prices is worse UX than that picker and defeats its purpose. In this case ui_text/tts_text can be a brief one-line acknowledgement (it will likely be replaced by the picker anyway). Set answered_from_product_context to false, return_retention_triggered to false, purchase_intent_detected to false, and grounded_via_recent_item to false. This does NOT apply when rule 3b below resolves the query to RECENTLY DISCUSSED ITEM instead - a pronoun referring to a known item is never a fresh browsing request, no matter how many loose/unrelated matches this message's own CONTEXT happens to contain.
+3. Success Case (Single Specific Item): Only when CONTEXT effectively resolves to ONE relevant item (either exactly one product in CONTEXT, or the query clearly asks about one specific item even if a second loosely-related product is also present in CONTEXT) do you answer directly. Answer warmly. You MUST state the price in both ui_text and tts_text (e.g. "haan, yeh 399 rupaye mein available hai"). Set answered_from_product_context to true, return_retention_triggered to false, purchase_intent_detected to false, and grounded_via_recent_item to false (this message's own CONTEXT is what resolved it, not a recall of an older item).
+3b. Pronoun Fallback to Recently Discussed Item: The query may refer to a product using only a pronoun/demonstrative and no product-specific words at all (e.g. "iska size kya hai?", "ismein aur colors hain?", "is it available in blue?", "what sizes are available in this?"). A query like that has nothing for its own CONTEXT above to match against, so CONTEXT will usually be empty or a noisy, unrelated set of loose matches - the same situation Priority 2's condition (b) above already handles for purchase confirmations. Apply the identical resolution here: if RECENTLY DISCUSSED ITEM above is present (it says "None." when it is not), treat IT as the grounding item for this Success Case and answer from its attributes, instead of falling through to the Browsing Case or refusing for lack of context. Do NOT trigger a broad catalog search or picker just because this message's own CONTEXT was empty/ambiguous - a known pronoun referring to an already-shared/posted item always takes priority over that. This only applies while the pronoun genuinely points at RECENTLY DISCUSSED ITEM; if the query names a different/new product or category, resolve normally instead. This is a DEEP-DIVE / DRILL-DOWN turn on an already-selected item, not a fresh identification - this message's own CONTEXT above may be noisy/unrelated (it was not a real match, just low-threshold search noise), so end ui_text with the exact closing question "kya isse order kar dun?" (and tts_text with its Devanagari equivalent "क्या इसे ऑर्डर कर दूं?") to prompt the sale. Set answered_from_product_context to true, return_retention_triggered to false, purchase_intent_detected to false, and grounded_via_recent_item to true - this last flag tells the system this message's own CONTEXT must not be trusted for anything (including the reply's image), only RECENTLY DISCUSSED ITEM's own image is safe.
+4. Strict Fallback Refusal (Details Missing): If asked for a specific attribute value genuinely absent from both CONTEXT and RECENTLY DISCUSSED ITEM (whichever grounded the answer), do NOT guess. ui_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL}" and tts_text MUST be EXACTLY: "{CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS}". Set answered_from_product_context to false, return_retention_triggered to false, purchase_intent_detected to false, and grounded_via_recent_item to false.
 
 # Phonetic & Formatting Guidelines for TTS
 - Never use currency symbols like '₹' or 'Rs.' - always spell out the number followed by 'रुपये' (e.g. "799 रुपये").
@@ -1656,8 +2001,8 @@ USER QUERY:
 - Keep responses strictly under 2 short sentences, except where an EXACT string is mandated above - reproduce that verbatim.
 
 # Output
-Image handling is managed entirely by the system based on your answered_from_product_context flag - do not attempt to output an image URL yourself, it is not part of your output schema.
-You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context, return_retention_triggered, purchase_intent_detected.
+Image handling is managed entirely by the system based on your answered_from_product_context and grounded_via_recent_item flags - do not attempt to output an image URL yourself, it is not part of your output schema.
+You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context, return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
 """
     result = generate_structured_with_fallback(customer_prompt, CustomerAgentResponse)
     reply_text = result.ui_text if result and result.ui_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL
@@ -1665,6 +2010,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     answered_from_product_context = result.answered_from_product_context if result else False
     return_retention_triggered = result.return_retention_triggered if result else False
     purchase_intent_detected = result.purchase_intent_detected if result else False
+    grounded_via_recent_item = result.grounded_via_recent_item if result else False
 
     # Priority 2 fired - stop here. No RAG image, no ambiguous-match picker,
     # no further product search: the customer already said what they want,
@@ -1676,19 +2022,80 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         state["reply_image_url"] = None
         state["reply_product_options"] = None
 
-        # The confirmed item is whichever one resolved condition (b) above -
-        # this message's own single match, or else the carried-over recent
-        # one. Used both for a more useful trace log entry and to give the
-        # Reseller segment's Notification Bell a real product name/price.
-        confirmed_product = similar_skus[0] if len(similar_skus) == 1 else recent_product
+        # The confirmed item must be the one the customer was actually just
+        # shown/discussing, not whatever this turn's own vector search
+        # happened to turn up - a bare confirmation phrase like "order kar
+        # do" or "ye lena hai" has no product-specific words in it, so any
+        # single same-turn match against it is name/description noise from a
+        # low similarity threshold, not a real reference. RECENTLY DISCUSSED
+        # ITEM (recent_product) is the one deterministic source of truth for
+        # what was actually established as the referent (seeded by a details
+        # view or a listing broadcast - see finalize_catalog_listing), so it
+        # must win whenever it's present; only fall back to this turn's own
+        # single match when there is no established item to confirm against.
+        # Getting this wrong is exactly the "Notification Bell shows a
+        # different product than what the customer actually confirmed" bug.
+        confirmed_product = recent_product if recent_product else (similar_skus[0] if len(similar_skus) == 1 else None)
+
+        state["reply_purchase_intent_detected"] = True
+
+        # Strict State Synchronization: the reseller notification is never
+        # built from confirmed_product / session state directly past this
+        # point - it is read back from the row db_client.save_order() actually
+        # persisted (echoed verbatim in mock mode; the real inserted row in
+        # Supabase mode). This is the definitive Order record - see the
+        # product-snapshot columns added to the orders table in
+        # supabase_schema.sql - so a later mismatch between "what the customer
+        # confirmed" and "what the reseller was told" is structurally
+        # impossible, not just unlikely: both come from the exact same row.
+        if confirmed_product:
+            reseller_id = state.get("reseller_id")
+            unit_price = confirmed_product.get("suggested_selling_price_inr")
+            listing_id = db_client.get_listing_id(reseller_id, confirmed_product.get("product_id")) if reseller_id else None
+            order_data = {
+                "reseller_id": reseller_id,
+                "listing_id": listing_id,
+                "buyer_whatsapp": whatsapp_number,
+                "quantity": 1,
+                "total_amount_inr": unit_price,
+                "status": "confirmed",
+                "product_id": confirmed_product.get("product_id"),
+                "product_name": confirmed_product.get("name"),
+                "unit_price_inr": unit_price,
+                "available_sizes": confirmed_product.get("sizes") or [],
+                "available_colors": confirmed_product.get("colors") or [],
+            }
+            saved_order = db_client.save_order(order_data)
+            # Falls back to the exact same Python-resolved values already in
+            # order_data whenever the DB write didn't go through (save_order
+            # returns {} on any insert error - e.g. a live schema drift where
+            # the orders table is missing a column this code expects, which
+            # is a real failure mode this app hit: the table must be migrated
+            # separately via supabase_schema.sql, editing that file alone
+            # does not apply it). Python already knows exactly what was
+            # confirmed regardless of whether the write succeeded - a
+            # transient/config write failure must never blank out the
+            # reseller notification; it only means this order has no durable
+            # order_id to reference later. dict.get(key, default) here relies
+            # on the KEY being absent (not just falsy) on failure, which
+            # holds: saved_order is {} in that case, so every key is absent.
+            state["reply_order_id"] = saved_order.get("id")
+            state["reply_confirmed_product_name"] = saved_order.get("product_name", order_data["product_name"])
+            state["reply_confirmed_product_price"] = saved_order.get("unit_price_inr", order_data["unit_price_inr"])
+            state["reply_confirmed_product_is_unlisted"] = not saved_order.get("listing_id", listing_id)
+        else:
+            # Condition (b) still failed despite purchase_intent_detected somehow
+            # coming back true (a model inconsistency, not a case Python can
+            # resolve) - nothing to persist; notify with no product identity
+            # rather than guessing one.
+            state["reply_order_id"] = None
+            state["reply_confirmed_product_name"] = None
+            state["reply_confirmed_product_price"] = None
+            state["reply_confirmed_product_is_unlisted"] = False
+
         # Order is placed - clear the remembered item so a stray later
         # message doesn't "confirm" the same purchase a second time.
         LAST_VIEWED_PRODUCT.pop(session_key, None)
-
-        state["reply_purchase_intent_detected"] = True
-        state["reply_confirmed_product_name"] = confirmed_product.get("name") if confirmed_product else None
-        state["reply_confirmed_product_price"] = confirmed_product.get("suggested_selling_price_inr") if confirmed_product else None
-        state["reply_confirmed_product_is_unlisted"] = confirmed_product.get("is_unlisted", False) if confirmed_product else False
 
         latency = int((time.time() - t_start) * 1000)
         log_event = {
@@ -1699,7 +2106,8 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
             "data": {
                 "action": "order_placed",
                 "notified": "reseller",
-                "product_name": confirmed_product.get("name") if confirmed_product else None
+                "order_id": state.get("reply_order_id"),
+                "product_name": state.get("reply_confirmed_product_name")
             }
         }
         state["trace_logs"].append(log_event)
@@ -1769,6 +2177,21 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         })
         return state
 
+    # Drill-Down State: rule 3b resolved this turn from RECENTLY DISCUSSED ITEM,
+    # not this message's own CONTEXT - a pronoun-only follow-up ("iska size kya
+    # hai?") has no product-specific words in it, so any single-item match
+    # similar_skus turns up against it is name/description noise from the low
+    # similarity threshold, not a real reference. Trusting that noise for the
+    # image (the old behaviour below) is exactly the "correct text, unrelated/
+    # hallucinated image" bug - so a drill-down turn never attaches ANY image,
+    # and always closes with the mandated sale-prompt CTA instead.
+    is_drill_down_followup = answered_from_product_context and grounded_via_recent_item
+    if is_drill_down_followup:
+        if DRILL_DOWN_CTA.lower() not in reply_text.lower():
+            reply_text = f"{reply_text.rstrip()} {DRILL_DOWN_CTA}"
+        if DRILL_DOWN_CTA_TTS not in reply_tts_text:
+            reply_tts_text = f"{reply_tts_text.rstrip()} {DRILL_DOWN_CTA_TTS}"
+
     state["reply_text"] = reply_text
     state["reply_tts_text"] = reply_tts_text
 
@@ -1776,18 +2199,21 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     # match, or (rule 3b above) the carried-over RECENTLY DISCUSSED ITEM when
     # a pronoun-only query ("iska size kya hai?") left similar_skus empty/
     # noisy. Mirrors the same fallback Priority 2 already uses for
-    # confirmed_product above.
-    grounding_product = similar_skus[0] if similar_skus else recent_product
+    # confirmed_product above. On a drill-down turn, similar_skus is never
+    # trusted at all (see is_drill_down_followup above) - only recent_product is.
+    grounding_product = recent_product if is_drill_down_followup else (similar_skus[0] if similar_skus else recent_product)
 
     # Whitelist Condition 2: only attach the product photo when the agent
     # actually answered a grounded product question from context. Default is
     # no image; every other case - fallback/apology, Purchase Handoff, Return
-    # Retention Hook, greetings, anything else - is excluded by default, not
-    # individually enumerated. Gated on the model's own explicit flag rather
-    # than the real base_image_url ever passing through the model itself.
+    # Retention Hook, greetings, Drill-Down State (Action A - media suppressed
+    # by spec regardless of whether the image would've been correct), anything
+    # else - is excluded by default, not individually enumerated. Gated on the
+    # model's own explicit flag rather than the real base_image_url ever
+    # passing through the model itself.
     state["reply_image_url"] = (
         grounding_product.get("base_image_url")
-        if answered_from_product_context and grounding_product
+        if answered_from_product_context and grounding_product and not is_drill_down_followup
         else None
     )
 
@@ -2168,6 +2594,7 @@ def get_sakhi_agent_graph():
     builder.add_node("check_pending_return", check_pending_return)
     builder.add_node("check_pending_approval", check_pending_approval)
     builder.add_node("check_pending_selection", check_pending_selection)
+    builder.add_node("check_fresh_context_lock", check_fresh_context_lock)
     builder.add_node("detect_intent", detect_intent)
     builder.add_node("catalog_agent", run_catalog_agent)
     builder.add_node("finalize_catalog_listing", finalize_catalog_listing)
@@ -2219,7 +2646,20 @@ def get_sakhi_agent_graph():
         {
             "catalog": "catalog_agent",
             "customer": "customer_agent",
-            "not_pending": "detect_intent"
+            "not_pending": "check_fresh_context_lock"
+        }
+    )
+
+    # Latest Context Lock gate: intercepts exactly the customer's next message
+    # after a reseller listing was just broadcast (see check_fresh_context_lock's
+    # docstring) and binds it deterministically to that product, bypassing
+    # detect_intent's classifier and a fresh vector search entirely.
+    builder.add_conditional_edges(
+        "check_fresh_context_lock",
+        route_fresh_context_lock,
+        {
+            "handled": "assemble_reply",
+            "not_locked": "detect_intent"
         }
     )
 

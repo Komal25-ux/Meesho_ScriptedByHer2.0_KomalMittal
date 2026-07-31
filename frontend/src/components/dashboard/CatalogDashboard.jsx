@@ -31,6 +31,27 @@ function aggregatePastOrders(transactions) {
   return [...byProduct.values()];
 }
 
+// Listings the reseller has just created via chat that have never appeared
+// in the 60-day transaction history at all - i.e. genuinely new to Past
+// Orders, not merely relisted. These get a card with the reseller's just-set
+// price and 0 profit/units sold, since there's no sales history yet; a
+// relisted product that HAS sold before keeps its real aggregated numbers
+// untouched (a new listing event shouldn't zero out real past performance).
+function mergeNewListings(pastOrders, newListings) {
+  const existingNames = new Set(pastOrders.map((p) => p.productName));
+  const brandNew = newListings
+    .filter((listing) => listing.name && !existingNames.has(listing.name))
+    .map((listing) => ({
+      productName: listing.name,
+      category: listing.category,
+      totalArticlesSold: 0,
+      totalProfit: 0,
+      totalRevenue: 0,
+      sellingPriceOverride: listing.price
+    }));
+  return [...pastOrders, ...brandNew];
+}
+
 function SegmentedToggle({ options, value, onChange }) {
   return (
     <div className="inline-flex border border-[#1E1E24] rounded-[0.5rem] overflow-hidden shrink-0">
@@ -58,8 +79,10 @@ const inr = (value) => Number(value).toLocaleString('en-IN');
 function PastOrderCard({ product, isTopPerformer }) {
   // Selling price isn't tracked per-transaction in mockSalesData - derived
   // here from the same product's revenue/quantity ratio, the actual average
-  // per-unit price the reseller sold at over the window.
-  const sellingPrice = Math.round(product.totalRevenue / product.totalArticlesSold);
+  // per-unit price the reseller sold at over the window. A brand-new listing
+  // (see mergeNewListings) has 0 units sold, so there's no ratio to derive -
+  // it carries its own just-set price directly instead.
+  const sellingPrice = product.sellingPriceOverride ?? Math.round(product.totalRevenue / product.totalArticlesSold);
 
   return (
     <div
@@ -98,10 +121,13 @@ function CatalogCard({ product }) {
   );
 }
 
-export default function CatalogDashboard() {
+export default function CatalogDashboard({ newListings = [] }) {
   const [view, setView] = useState('past'); // 'past' | 'catalog'
 
-  const pastOrders = useMemo(() => aggregatePastOrders(mockSalesData), []);
+  const pastOrders = useMemo(
+    () => mergeNewListings(aggregatePastOrders(mockSalesData), newListings),
+    [newListings]
+  );
 
   // Top 3-4 best sellers by units moved (not just the single #1) get the
   // green glow - ranked on totalArticlesSold since "best seller" is a sales

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { TrendingUp, PieChart as PieChartIcon } from 'lucide-react';
+import { TrendingUp, PieChart as PieChartIcon, Calendar as CalendarIcon, X } from 'lucide-react';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -13,6 +13,7 @@ import {
   Legend
 } from 'recharts';
 import { mockSalesData } from '../../data/mockSalesData';
+import CalendarRangePicker from './CalendarRangePicker';
 
 // "Denim and Industrial Craft" chart palette, cycled if there are more
 // categories than colors.
@@ -65,14 +66,22 @@ function lastNDates(anchorDateStr, windowDays) {
   return dates;
 }
 
-// One point per calendar day in the last `windowDays` days - Weekly = 7,
-// Monthly = 30 - zero-filled so the X-axis always plots exactly that many
-// points, matching what the Weekly/Monthly toggle promises.
-function buildDailyChartData(transactions, windowDays) {
-  if (transactions.length === 0) return [];
-  const anchor = getAnchorDate(transactions);
-  const dates = lastNDates(anchor, windowDays);
+// Every date (YYYY-MM-DD, inclusive) between startStr and endStr - used for
+// the custom calendar-picked range, where the caller supplies an explicit
+// [start, end] rather than "last N days back from the anchor".
+function datesInRange(startStr, endStr) {
+  const end = parseDateUTC(endStr);
+  const dates = [];
+  for (let d = parseDateUTC(startStr); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    dates.push(toDateStrUTC(d));
+  }
+  return dates;
+}
 
+// One point per date in `dates`, zero-filled so the X-axis always plots
+// exactly that many points regardless of whether a given day had any sales.
+function buildDailyChartDataForDates(transactions, dates) {
+  if (dates.length === 0) return [];
   const byDate = new Map();
   for (const txn of transactions) {
     if (!byDate.has(txn.date)) byDate.set(txn.date, { sales: 0, profit: 0, quantity: 0 });
@@ -88,18 +97,20 @@ function buildDailyChartData(transactions, windowDays) {
   });
 }
 
-// Category totals (Sales ₹ or Quantity, matching the metric toggle) for the
-// SAME last-7/last-30-day window the line chart is showing - this is what
-// keeps the pie chart "timeframe-synced" instead of always summarizing the
-// full 2-month history regardless of which toggle is selected.
-function buildCategoryBreakdown(transactions, windowDays, metric) {
+// Weekly = last 7 days, Monthly = last 30 days, both ending at the anchor.
+function buildDailyChartData(transactions, windowDays) {
   if (transactions.length === 0) return [];
   const anchor = getAnchorDate(transactions);
-  const windowStart = lastNDates(anchor, windowDays)[0];
+  return buildDailyChartDataForDates(transactions, lastNDates(anchor, windowDays));
+}
 
+// Category totals (Sales ₹ or Quantity, matching the metric toggle) for an
+// explicit [startStr, endStr] window - what keeps the pie chart in sync with
+// whatever range the line chart above it is showing, custom or not.
+function buildCategoryBreakdownForRange(transactions, startStr, endStr, metric) {
   const totals = new Map();
   for (const txn of transactions) {
-    if (txn.date < windowStart || txn.date > anchor) continue;
+    if (txn.date < startStr || txn.date > endStr) continue;
     const value = metric === 'quantity' ? txn.quantity : txn.revenue;
     totals.set(txn.category, (totals.get(txn.category) || 0) + value);
   }
@@ -108,6 +119,14 @@ function buildCategoryBreakdown(transactions, windowDays, metric) {
     .filter(([, value]) => value > 0)
     .sort((a, b) => b[1] - a[1])
     .map(([name, value]) => ({ name, value }));
+}
+
+// Weekly = last 7 days, Monthly = last 30 days, both ending at the anchor.
+function buildCategoryBreakdown(transactions, windowDays, metric) {
+  if (transactions.length === 0) return [];
+  const anchor = getAnchorDate(transactions);
+  const windowStart = lastNDates(anchor, windowDays)[0];
+  return buildCategoryBreakdownForRange(transactions, windowStart, anchor, metric);
 }
 
 function SegmentedToggle({ options, value, onChange }) {
@@ -164,18 +183,40 @@ export default function GrowthDashboard() {
   const [metric, setMetric] = useState('sales'); // 'sales' | 'quantity'
   const windowDays = timeframe === 'weekly' ? 7 : 30;
 
-  const chartData = useMemo(
-    () => buildDailyChartData(mockSalesData, windowDays),
-    [windowDays]
-  );
-  const categoryData = useMemo(
-    () => buildCategoryBreakdown(mockSalesData, windowDays, metric),
-    [windowDays, metric]
-  );
+  // Custom calendar-picked range overrides the rolling Weekly/Monthly window
+  // until cleared or the toggle is changed again. { start, end } | null.
+  const [customRange, setCustomRange] = useState(null);
+  const [showCalendar, setShowCalendar] = useState(false);
+
+  // Switching the Weekly/Monthly toggle exits custom-range mode - the two
+  // are alternate ways to pick a window, not layered on top of each other.
+  const handleTimeframeChange = (value) => {
+    setTimeframe(value);
+    setCustomRange(null);
+  };
+
+  const chartData = useMemo(() => {
+    if (customRange) {
+      return buildDailyChartDataForDates(mockSalesData, datesInRange(customRange.start, customRange.end));
+    }
+    return buildDailyChartData(mockSalesData, windowDays);
+  }, [windowDays, customRange]);
+
+  const categoryData = useMemo(() => {
+    if (customRange) {
+      return buildCategoryBreakdownForRange(mockSalesData, customRange.start, customRange.end, metric);
+    }
+    return buildCategoryBreakdown(mockSalesData, windowDays, metric);
+  }, [windowDays, metric, customRange]);
+
   const categoryTotal = useMemo(
     () => categoryData.reduce((sum, entry) => sum + entry.value, 0),
     [categoryData]
   );
+
+  // Long ranges (Monthly toggle, or a custom range spanning > 10 days) get
+  // the rotated/sparser X-axis labels; short ranges get one label per day.
+  const isLongRange = chartData.length > 10;
 
   return (
     <div className="h-full overflow-y-auto pb-8">
@@ -193,18 +234,58 @@ export default function GrowthDashboard() {
                 { value: 'monthly', label: 'Monthly' }
               ]}
               value={timeframe}
-              onChange={setTimeframe}
+              onChange={handleTimeframeChange}
             />
           </div>
-          <SegmentedToggle
-            options={[
-              { value: 'sales', label: 'Sales' },
-              { value: 'quantity', label: 'Quantity' }
-            ]}
-            value={metric}
-            onChange={setMetric}
-          />
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowCalendar((v) => !v)}
+                className={`p-1.5 border border-[#1E1E24] rounded-[0.5rem] transition ${
+                  customRange ? 'bg-[#FC8B16] text-white' : 'bg-white text-[#1E1E24] hover:bg-[#F7F7FA]'
+                }`}
+                aria-label="Pick a custom date range"
+                title={customRange ? `Custom range: ${customRange.start} → ${customRange.end}` : 'Pick a custom date range'}
+              >
+                <CalendarIcon className="w-4 h-4" />
+              </button>
+              {showCalendar && (
+                <CalendarRangePicker
+                  timeframe={timeframe}
+                  initialDate={customRange?.start ?? null}
+                  onClose={() => setShowCalendar(false)}
+                  onDone={(range) => {
+                    setCustomRange(range);
+                    setShowCalendar(false);
+                  }}
+                />
+              )}
+            </div>
+            <SegmentedToggle
+              options={[
+                { value: 'sales', label: 'Sales' },
+                { value: 'quantity', label: 'Quantity' }
+              ]}
+              value={metric}
+              onChange={setMetric}
+            />
+          </div>
         </div>
+
+        {customRange && (
+          <div className="flex items-center gap-1.5 -mt-2 mb-3 text-[11px] font-mono text-[#1E1E24]">
+            <span>Custom range: {customRange.start} → {customRange.end}</span>
+            <button
+              type="button"
+              onClick={() => setCustomRange(null)}
+              className="p-0.5 hover:bg-[#F7F7FA] rounded"
+              aria-label="Clear custom range"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
 
         {/* Line/Area Chart - exactly `windowDays` points, one per calendar day */}
         <div className="flex justify-center items-center w-full h-64">
@@ -228,10 +309,10 @@ export default function GrowthDashboard() {
                 dataKey="day"
                 stroke="#1E1E24"
                 style={{ fontSize: '9px', fontFamily: 'monospace' }}
-                interval={timeframe === 'monthly' ? 3 : 0}
-                angle={timeframe === 'monthly' ? -45 : 0}
-                textAnchor={timeframe === 'monthly' ? 'end' : 'middle'}
-                height={timeframe === 'monthly' ? 40 : 30}
+                interval={isLongRange ? 3 : 0}
+                angle={isLongRange ? -45 : 0}
+                textAnchor={isLongRange ? 'end' : 'middle'}
+                height={isLongRange ? 40 : 30}
               />
               <YAxis
                 stroke="#1E1E24"

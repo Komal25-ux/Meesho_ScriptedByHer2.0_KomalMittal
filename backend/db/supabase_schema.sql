@@ -45,14 +45,42 @@ CREATE TABLE IF NOT EXISTS listings (
 CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     reseller_id UUID REFERENCES resellers(id) ON DELETE CASCADE,
-    listing_id UUID REFERENCES listings(id) ON DELETE SET NULL,
-    buyer_whatsapp VARCHAR(20) NOT NULL,
+    listing_id UUID REFERENCES listings(id) ON DELETE SET NULL,  -- NULL when the product wasn't yet listed by this reseller at order time
+    buyer_whatsapp VARCHAR(30) NOT NULL,  -- matches resellers.whatsapp_number's width - "whatsapp:+91XXXXXXXXXX" is 22+ chars, VARCHAR(20) truncated/rejected real inserts
     quantity INTEGER DEFAULT 1,
     total_amount_inr INTEGER NOT NULL,
     status VARCHAR(20) DEFAULT 'confirmed',        -- confirmed | returned | exchanged
+    -- Denormalized product snapshot AT THE MOMENT OF CONFIRMATION. This is
+    -- deliberate duplication, not an oversight: listing_id/product_embeddings
+    -- data can change later (price renegotiated, listing deactivated) or may
+    -- not exist at all yet (unlisted-product purchase, listing_id NULL above),
+    -- so the reseller notification and any later audit must read the exact
+    -- product identity/price/variant options that were true AT CHECKOUT from
+    -- this row directly - never re-derived via a join or re-fetched from
+    -- mutable session/catalog state after the fact.
+    product_id VARCHAR(50),
+    product_name TEXT,
+    unit_price_inr INTEGER,
+    available_sizes TEXT[],
+    available_colors TEXT[],
     ordered_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Migration safety net: CREATE TABLE IF NOT EXISTS above is a no-op against an
+-- orders table that already existed before the product-snapshot columns were
+-- added, so re-running this file alone would silently NOT backfill them on an
+-- existing database. These are idempotent and safe to re-run.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_id VARCHAR(50);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_name TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS unit_price_inr INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS available_sizes TEXT[];
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS available_colors TEXT[];
+-- Pre-existing bug, unrelated to the columns above: buyer_whatsapp was
+-- VARCHAR(20), too narrow for this app's "whatsapp:+91XXXXXXXXXX" format
+-- (22+ chars) - every real insert was rejected with "value too long for
+-- type character varying(20)". Safe to re-run even if already widened.
+ALTER TABLE orders ALTER COLUMN buyer_whatsapp TYPE VARCHAR(30);
 
 -- 6. Returns Table
 CREATE TABLE IF NOT EXISTS returns (
@@ -146,3 +174,21 @@ AS $$
   ORDER BY product_embeddings.embedding <=> query_embedding
   LIMIT match_count;
 $$;
+
+-- 11. Row-Level Security
+-- The backend only ever talks to Supabase via SUPABASE_SERVICE_KEY
+-- (backend/db/supabase_client.py), and the service_role key bypasses RLS
+-- entirely - so enabling RLS here has no effect on the app. Without it,
+-- every table below is readable/writable by anyone holding the project's
+-- anon key via the PostgREST API, which is what Supabase's linter flags as
+-- "Table publicly accessible" / "Sensitive data publicly accessible"
+-- (resellers.whatsapp_number, orders.buyer_whatsapp, etc. are PII).
+-- No policies are created, so RLS defaults to deny-all for anon/authenticated.
+ALTER TABLE resellers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reseller_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE listings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE returns ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_embeddings ENABLE ROW LEVEL SECURITY;
