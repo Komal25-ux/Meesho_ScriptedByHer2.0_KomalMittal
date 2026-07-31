@@ -222,8 +222,12 @@ def generate_with_fallback(parts):
                 last_error = e
                 logger.warning(f"Gemini model '{model_name}' failed: {e}")
                 err_msg = str(e).lower()
-                # If it's a quota or credential issue, rotate key immediately
-                if any(w in err_msg for w in ["quota", "exhausted", "429", "403", "invalid", "limit"]):
+                # Only break for key-level errors (bad/revoked key, permission
+                # denied) - those affect every model under this key equally.
+                # Quota/429/exhausted errors are per-model (see FALLBACK_MODELS
+                # above), so those fall through to `continue` and try the next
+                # model under the SAME key first.
+                if any(w in err_msg for w in ["403", "invalid"]):
                     break
                 continue
                 
@@ -260,7 +264,12 @@ def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[
                 last_error = e
                 logger.warning(f"Gemini model '{model_name}' structured call failed: {e}")
                 err_msg = str(e).lower()
-                if any(w in err_msg for w in ["quota", "exhausted", "429", "403", "invalid", "limit"]):
+                # Only break for key-level errors (bad/revoked key, permission
+                # denied) - those affect every model under this key equally.
+                # Quota/429/exhausted errors are per-model (see FALLBACK_MODELS
+                # above), so those fall through to `continue` and try the next
+                # model under the SAME key first.
+                if any(w in err_msg for w in ["403", "invalid"]):
                     break
                 continue
                 
