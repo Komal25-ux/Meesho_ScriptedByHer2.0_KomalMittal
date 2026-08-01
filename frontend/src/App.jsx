@@ -12,6 +12,7 @@ import {
   TrendingDown
 } from 'lucide-react';
 import MessageBubble from './components/chat/MessageBubble';
+import TypingIndicator from './components/chat/TypingIndicator';
 import ChatInputBar from './components/chat/ChatInputBar';
 import NotificationBell from './components/chat/NotificationBell';
 import TerminalTraceLog from './components/dashboard/TerminalTraceLog';
@@ -47,6 +48,10 @@ export default function App() {
 
   const [textInput, setTextInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // 'text' | 'voice' - which TypingIndicator label to show while isLoading is
+  // true. Voice turns run a much longer pipeline (ASR -> Gemini -> TTS) than
+  // text turns, so the two need distinct copy rather than one generic label.
+  const [loadingKind, setLoadingKind] = useState('text');
   const [traceLogs, setTraceLogs] = useState([]);
 
   // Reseller-side Notification Bell - bridges the Customer segment's
@@ -317,6 +322,7 @@ export default function App() {
     const msg = (overrideText ?? textInput).trim();
     if (!msg || isLoading) return;
     if (overrideText === undefined) setTextInput('');
+    setLoadingKind('text');
     setIsLoading(true);
 
     // Optimistic user bubble update
@@ -373,6 +379,7 @@ export default function App() {
   // Audio blob send handler
   const handleSendAudio = async (audioBlob) => {
     if (isLoading) return;
+    setLoadingKind('voice');
     setIsLoading(true);
 
     // Optimistic temporary user voice bubble
@@ -593,6 +600,7 @@ export default function App() {
             {currentMessages.map((msg, index) => (
               <MessageBubble key={index} message={msg} onSelectProduct={handleProductCardClick} />
             ))}
+            {isLoading && <TypingIndicator kind={loadingKind} />}
             <div ref={chatEndRef} />
           </div>
 
