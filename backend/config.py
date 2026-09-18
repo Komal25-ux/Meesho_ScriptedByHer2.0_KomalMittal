@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_FALLBACK: str = ""
     GEMINI_API_KEY_FALLBACK_2: str = ""
     GEMINI_MODEL: str = "gemini-flash-lite-latest"
+    GEMINI_FALLBACK_MODELS: str = "gemini-3.5-flash-lite,gemini-2.5-flash,gemini-3.1-flash-lite,gemini-3-flash-preview"
     
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""

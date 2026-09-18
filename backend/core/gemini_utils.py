@@ -188,14 +188,16 @@ def rotate_gemini_key():
         logger.info(f"Rotating Gemini API Key index to: {_CURRENT_KEY_INDEX}")
         configure_gemini()
 
-# The free tier enforces a per-model daily request quota, not a per-key one -
-# trying several models in order means one model running dry doesn't stall
-# every agent, since each model has its own separate quota bucket.
-FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.0-flash-lite"]
+def _get_fallback_models() -> list[str]:
+    raw = getattr(settings, "GEMINI_FALLBACK_MODELS", "")
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview"]
 
-def _model_chain():
-    chain = [settings.GEMINI_MODEL]
-    for m in FALLBACK_MODELS:
+def _model_chain() -> list[str]:
+    primary = settings.GEMINI_MODEL.strip() if settings.GEMINI_MODEL else "gemini-flash-lite-latest"
+    chain = [primary]
+    for m in _get_fallback_models():
         if m not in chain:
             chain.append(m)
     return chain
@@ -217,6 +219,7 @@ def generate_with_fallback(parts):
                 response = model.generate_content(parts)
                 text = response.text.strip()
                 if text:
+                    logger.info(f"Gemini generation success using model '{model_name}' (Key index {_CURRENT_KEY_INDEX})")
                     return text
             except Exception as e:
                 last_error = e
@@ -224,9 +227,8 @@ def generate_with_fallback(parts):
                 err_msg = str(e).lower()
                 # Only break for key-level errors (bad/revoked key, permission
                 # denied) - those affect every model under this key equally.
-                # Quota/429/exhausted errors are per-model (see FALLBACK_MODELS
-                # above), so those fall through to `continue` and try the next
-                # model under the SAME key first.
+                # Quota/429/exhausted errors are per-model, so those fall
+                # through to `continue` and try the next model under the SAME key first.
                 if any(w in err_msg for w in ["403", "invalid"]):
                     break
                 continue
@@ -259,16 +261,15 @@ def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[
                         response_schema=schema
                     )
                 )
-                return schema.model_validate_json(response.text)
+                validated = schema.model_validate_json(response.text)
+                logger.info(f"Gemini structured success using model '{model_name}' (Key index {_CURRENT_KEY_INDEX})")
+                return validated
             except Exception as e:
                 last_error = e
                 logger.warning(f"Gemini model '{model_name}' structured call failed: {e}")
                 err_msg = str(e).lower()
                 # Only break for key-level errors (bad/revoked key, permission
                 # denied) - those affect every model under this key equally.
-                # Quota/429/exhausted errors are per-model (see FALLBACK_MODELS
-                # above), so those fall through to `continue` and try the next
-                # model under the SAME key first.
                 if any(w in err_msg for w in ["403", "invalid"]):
                     break
                 continue
@@ -278,3 +279,29 @@ def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[
             
     logger.error(f"All Gemini fallback models and keys failed for structured output. Last error: {last_error}")
     return None
+
+def embed_content_with_fallback(text: str, task_type: str = "retrieval_query", output_dimensionality: int = 768) -> list[float]:
+    """Generates embeddings with API key rotation fallback if a key is exhausted or fails."""
+    if not text or not text.strip():
+        return []
+    keys = _get_gemini_keys()
+    num_keys = len(keys) if keys else 1
+    last_error = None
+    for key_attempt in range(num_keys):
+        if not configure_gemini():
+            return []
+        try:
+            embed_res = genai.embed_content(
+                model="models/gemini-embedding-001",
+                content=text,
+                task_type=task_type,
+                output_dimensionality=output_dimensionality
+            )
+            return embed_res.get("embedding", [])
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Gemini embedding failed with key index {_CURRENT_KEY_INDEX}: {e}")
+            if num_keys > 1:
+                rotate_gemini_key()
+    logger.error(f"All Gemini keys failed for embedding generation. Last error: {last_error}")
+    return []

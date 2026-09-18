@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
-from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse, IntentRouter
+from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, embed_content_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse, IntentRouter
 from backend.data.mock_sales_data import MOCK_SALES_DATA
 
 logger = logging.getLogger("sakhi-backend")
@@ -333,19 +333,7 @@ Output ONLY valid JSON: {{"category": "sarees"|"kurtis"|"suits"|"tops"|"lehengas
     return None
 
 def _embed_text(text: str) -> list:
-    if not configure_gemini():
-        return []
-    try:
-        embed_res = genai.embed_content(
-            model="models/gemini-embedding-001",
-            content=text,
-            task_type="retrieval_query",
-            output_dimensionality=768
-        )
-        return embed_res["embedding"]
-    except Exception as e:
-        logger.error(f"Embedding generation failed in Returns Retention flow: {e}")
-        return []
+    return embed_content_with_fallback(text, task_type="retrieval_query", output_dimensionality=768)
 
 def _lookup_product_by_name(product_name: str) -> Optional[Dict[str, Any]]:
     """Anchors the Returns Retention flow to the actual item being returned by
@@ -1247,19 +1235,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         exclude_ids = SHOWN_PRODUCT_IDS.get(session_key, []) if category_filter else []
 
         # 1. Generate text embedding using Gemini
-        embedding = []
-        if configure_gemini():
-            try:
-                # Query embedding
-                embed_res = genai.embed_content(
-                    model="models/gemini-embedding-001",
-                    content=user_input,
-                    task_type="retrieval_query",
-                    output_dimensionality=768
-                )
-                embedding = embed_res['embedding']
-            except Exception as e:
-                logger.error(f"Embedding generation failed in Catalog Agent: {e}")
+        embedding = embed_content_with_fallback(user_input, task_type="retrieval_query", output_dimensionality=768)
 
         # 2. Query Supabase vector similarity - up to 4 candidates, since an
         # ambiguous match now shows a picker instead of silently auto-drafting
@@ -1796,18 +1772,7 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
         exclude_ids = SHOWN_PRODUCT_IDS.get(session_key, []) if category_filter else []
 
         # 1. Generate text embedding using Gemini
-        embedding = []
-        if configure_gemini():
-            try:
-                embed_res = genai.embed_content(
-                    model="models/gemini-embedding-001",
-                    content=user_input,
-                    task_type="retrieval_query",
-                    output_dimensionality=768
-                )
-                embedding = embed_res['embedding']
-            except Exception as e:
-                logger.error(f"Embedding generation failed in Customer Agent: {e}")
+        embedding = embed_content_with_fallback(user_input, task_type="retrieval_query", output_dimensionality=768)
 
         # 2. Query Supabase vector similarity matching - up to 4 candidates,
         # strictly within category_filter (if the message was scoped to one)
