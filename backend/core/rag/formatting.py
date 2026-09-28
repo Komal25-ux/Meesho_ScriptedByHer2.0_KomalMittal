@@ -1,6 +1,6 @@
 from typing import Dict, Any
 
-__all__ = ["_format_product_line"]
+__all__ = ["_format_product_line", "_format_alternative_context"]
 
 
 def _format_product_line(p: Dict[str, Any]) -> str:
@@ -16,3 +16,14 @@ def _format_product_line(p: Dict[str, Any]) -> str:
         f"Material: {p.get('material') or 'Not specified'} | "
         f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
     )
+
+
+def _format_alternative_context(pending: Dict[str, Any], stage_label: str) -> str:
+    if stage_label in ("B", "C") and pending.get("proposed_alternative"):
+        alt = pending["proposed_alternative"]
+        return (
+            f"ALTERNATIVE_PRODUCT: {alt.get('name')} | Price: {alt.get('suggested_selling_price_inr')} rupaye | "
+            f"Sizes: {', '.join(alt.get('sizes') or []) or 'Not specified'} | "
+            f"Colors: {', '.join(alt.get('colors') or []) or 'Not specified'}"
+        )
+    return "ALTERNATIVE_PRODUCT: N/A (not applicable at this stage)."

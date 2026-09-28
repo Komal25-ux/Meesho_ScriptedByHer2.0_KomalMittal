@@ -31,9 +31,14 @@ from backend.core.routing.approval import ApprovalIntent, classify_approval_inte
 from backend.core.routing.category import CategoryIntent, extract_category_intent
 from backend.core.routing.returns import ReturnGrievanceIntent, classify_return_grievance
 from backend.core.routing.exchange import ExchangeConfirmationIntent, classify_exchange_confirmation
+from backend.core.routing.triggers import _strip_trigger_prefix
+from backend.core.routing.buying_interest import BuyingInterestIntent, classify_buying_interest
+from backend.core.routing.attribute_followup import AttributeFollowupIntent, classify_attribute_followup
 from backend.core.metrics.sales import _extract_timeframe_days, _aggregate_sales_for_window
 from backend.core.rag.embeddings import _embed_text
-from backend.core.rag.formatting import _format_product_line
+from backend.core.rag.formatting import _format_product_line, _format_alternative_context
+from backend.core.rag.retrieval import _lookup_product_by_name, _find_alternative_product
+from backend.core.catalog.captions import generate_whatsapp_caption
 from backend.data.mock_sales_data import MOCK_SALES_DATA
 
 logger = logging.getLogger("sakhi-backend")
@@ -88,17 +93,6 @@ LAST_VIEWED_PRODUCT: Dict[str, Dict[str, Any]] = {}
 FRESH_BROADCAST_LOCK: Dict[str, bool] = {}
 
 
-def _strip_trigger_prefix(text: str) -> str:
-    """Strips a recognized Product Card Click trigger prefix (either one),
-    returning just the product name that followed it. Returns `text`
-    unchanged if neither prefix matches, so this is always safe to call."""
-    for pattern in (CATALOG_SHARE_TRIGGER_RE, CUSTOMER_DETAILS_TRIGGER_RE):
-        match = pattern.match(text)
-        if match:
-            return text[match.end():].strip()
-    return text
-
-
 # Product IDs already shown to this session in the CURRENT category-scoped
 # browse (see run_customer_agent / run_catalog_agent's category-strict
 # pagination) - what "show more" excludes so a repeat request never repeats
@@ -127,27 +121,6 @@ PENDING_RETURNS: Dict[str, Dict[str, Any]] = {}
 
 
 
-
-def _lookup_product_by_name(product_name: str) -> Optional[Dict[str, Any]]:
-    """Anchors the Returns Retention flow to the actual item being returned by
-    semantic-matching its name against the real catalog - never guessed."""
-    matches = db_client.match_products(_embed_text(product_name), threshold=0.15, limit=1)
-    return matches[0] if matches else None
-
-def _find_alternative_product(original_product: Dict[str, Any], query_hint: str) -> Optional[Dict[str, Any]]:
-    """Scenario B/C alternative lookup: real RAG retrieval against the catalog
-    only - the model is never allowed to name a product it wasn't given.
-    query_hint biases the search toward the customer's actual complaint, and
-    the original product is excluded from its own results by product_id."""
-    matches = db_client.match_products(
-        _embed_text(f"{original_product.get('category', '')} {query_hint}"),
-        threshold=0.15,
-        limit=3
-    )
-    for m in matches:
-        if m.get("product_id") != original_product.get("product_id"):
-            return m
-    return None
 
 # ── RETURNS RETENTION FUNNEL SYSTEM PROMPT ────────────────────
 # Hardcoded behavioral matrix for the Returns Agent. CURRENT_STAGE and
@@ -404,51 +377,6 @@ def check_pending_selection(state: SakhiState) -> SakhiState:
 def route_pending_selection(state: SakhiState) -> str:
     return state.get("pending_selection_route", "not_pending")
 
-class BuyingInterestIntent(BaseModel):
-    interested: bool
-
-def classify_buying_interest(user_input: str, product_name: str) -> bool:
-    """Backs the Latest Context Lock (see FRESH_BROADCAST_LOCK): broader than
-    Priority 2's strict purchase-confirmation classifier in run_customer_agent,
-    since a customer's very first reaction to a just-posted product ("I want
-    to buy", "details bhejo", "kitne ka hai") is high interest, not yet a
-    checkout confirmation - but it still deserves to bind straight to that
-    product, not fall through to a fresh ambiguous-match search. Only decides
-    whether THIS message is about the just-posted product at all; false
-    correctly lets an unrelated first reply (a greeting, a return, a totally
-    different category) fall through to normal intent detection instead of
-    being force-bound to it."""
-    prompt = f"""A product was just posted/shared with a customer on WhatsApp:
-Product: {product_name}
-
-Their very next message was: "{user_input}"
-
-Does this message show interest in buying, ordering, or getting details/price about THIS product (e.g.
-"I want to buy", "details do", "price kya hai", "haan bhejo", "interested hu", "order kar do", "kitne ka
-hai")? Answer false if the message is clearly about something unrelated - a different product/category, a
-return/complaint, a greeting, or an unrelated topic.
-
-Output ONLY valid JSON: {{"interested": true|false}}"""
-    raw_text = generate_with_fallback(prompt)
-    if raw_text:
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
-            parsed = BuyingInterestIntent(**json.loads(cleaned))
-            return parsed.interested
-        except (json.JSONDecodeError, ValidationError, KeyError) as e:
-            logger.warning(f"Buying interest classification failed to parse ({e}); using keyword fallback.")
-
-    # Emergency fallback only - used if Gemini is entirely unreachable.
-    lower = user_input.strip().lower()
-    return any(k in lower for k in [
-        "buy", "khareed", "chahiye", "order", "price", "detail", "kitne", "interested",
-        "lena", "le lo", "de do", "bhejo", "haan", "chalega", "milega", "available"
-    ])
-
 # ── NODE 1.75: CHECK FRESH BROADCAST CONTEXT LOCK (Latest Context Lock) ──
 def check_fresh_context_lock(state: SakhiState) -> SakhiState:
     """Intercepts exactly the customer's next message after a reseller
@@ -548,17 +476,6 @@ return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
 
 def route_fresh_context_lock(state: SakhiState) -> str:
     return state.get("context_lock_route", "not_locked")
-
-
-def _format_alternative_context(pending: Dict[str, Any], stage_label: str) -> str:
-    if stage_label in ("B", "C") and pending.get("proposed_alternative"):
-        alt = pending["proposed_alternative"]
-        return (
-            f"ALTERNATIVE_PRODUCT: {alt.get('name')} | Price: {alt.get('suggested_selling_price_inr')} rupaye | "
-            f"Sizes: {', '.join(alt.get('sizes') or []) or 'Not specified'} | "
-            f"Colors: {', '.join(alt.get('colors') or []) or 'Not specified'}"
-        )
-    return "ALTERNATIVE_PRODUCT: N/A (not applicable at this stage)."
 
 # ── NODE 1.6: CHECK PENDING RETURN (Returns Retention Funnel) ─────
 def check_pending_return(state: SakhiState) -> SakhiState:
@@ -814,61 +731,6 @@ Reseller's message: "{user_input}"
 # ── CONDITIONAL ROUTE FUNCTION ────────────────────────────────
 def route_decision(state: SakhiState) -> str:
     return state.get("detected_intent", "GENERAL")
-
-def generate_whatsapp_caption(reseller_name: str, product_name: str, product_description: str, selling_price: int) -> CatalogCaptionResponse:
-    """Shared by the initial catalog draft and price-renegotiation so the caption
-    always reflects the current selling price. Returns the Hinglish caption
-    (posted to WhatsApp as-is, and shown in chat), a Devanagari version for when
-    this caption is read aloud, and a phonetic Devanagari transliteration of the
-    product name alone - CRITICAL TTS RULE: callers that echo the product name
-    back in a wrapper sentence (e.g. "Didi, <name> ke liye ... ready hai") must
-    use product_name_tts there, never the raw Latin-script name, or Sarvam reads
-    it with English stress patterns even inside an otherwise Devanagari sentence."""
-    # NOTE: base_image_url is deliberately not part of this prompt or of
-    # CatalogCaptionResponse's schema (see gemini_utils.py) - the caller
-    # already has that exact URL as a plain Python value the moment a product
-    # is matched (see run_catalog_agent), so asking the LLM to also echo it
-    # back in JSON would only add a reproduction-fidelity risk for zero
-    # benefit. Python attaches the real image directly (state["reply_image_url"]
-    # in run_catalog_agent / finalize_catalog_listing) instead.
-    catalog_prompt = f"""# System Persona & Core Objective
-You are 'Catalog Didi', a marketing and business assistant representing a Hindi-speaking Meesho reseller named {reseller_name}. Your primary job is to create engaging, persuasive, and custom-priced WhatsApp promotional posts for products that the reseller wants to list.
-
-# Input Context
-Product Name: {product_name}
-Product Description: {product_description}
-Selling Price: {selling_price} rupaye (final price to the customer, includes the reseller's profit margin)
-
-# WhatsApp Caption Formulation Rules (ui_text)
-This is the raw text post displayed in the reseller's chat and copied/shared directly to WhatsApp.
-- Mandatory Inclusion: you MUST explicitly include the product name and the selling price in the text.
-- Language: warm, friendly, persuasive Hinglish (Hindi words written in the English/Latin alphabet).
-- Length Limit: strictly under 5 lines to prevent clutter on mobile screens.
-- Aesthetics: use appropriate, eye-catching emojis (e.g. 🌸, ✨, 💸, 🛍️).
-- Call-to-Action Constraint: the text must end EXACTLY with: "Order karne ke liye mujhe WhatsApp message karein! 🌸"
-
-# Phonetic & Formatting Guidelines for TTS (tts_text)
-This represents the spoken version of the caption.
-- Purity Rule: must be written in Devanagari script. You must NOT include any English or Latin letters. You ARE allowed to use standard numbers (e.g. 399) for prices and sizes.
-- Translation Task: perform a direct translation of the Hinglish ui_text, sentence by sentence. Do not rewrite or change the messaging.
-- No Punctuation Clutter: remove markdown symbols (such as *, _, #) and raw emojis.
-- Product Name Transliteration: transliterate the product name phonetically into Devanagari characters (e.g. write "येलो चंदेरी साड़ी" instead of "Yellow Chanderi Saree").
-- Phonetic Currency Rule: never use the '₹' symbol or 'Rs.'. Use the number followed by 'रुपये' (e.g. "399 रुपये").
-- Pronunciation Spelling: never write abbreviations or names like "AI Sakhi". Always spell it phonetically in Devanagari as "ए आई सखी".
-
-# Dedicated Product Name Transliteration (product_name_tts)
-Isolate and transcribe ONLY the product name "{product_name}" phonetically into Devanagari for backend helper routines - preserve how it sounds in conversational English (e.g. "Pink Cotton Anarkali Suit" -> "पिंक कॉटन अनारकली सूट"). Do not translate the literal meaning, only the sound.
-
-# Output
-Image handling is managed entirely by the system - the caller already has the product image and does not need it echoed back. Do not attempt to output an image URL yourself, it is not part of your output schema.
-You must output your response using the provided JSON schema: ui_text, tts_text, product_name_tts.
-"""
-    result = generate_structured_with_fallback(catalog_prompt, CatalogCaptionResponse)
-    if result:
-        return result
-
-    fallback = f"🌸 *{product_name}* 🌸\n✨ Bahut hi pyaara fabric aur premium quality!\n💸 Final Price: ₹{selling_price}\nOrder karne ke liye mujhe WhatsApp message karein! 🌸"
-    return CatalogCaptionResponse(ui_text=fallback, tts_text=fallback, product_name_tts=product_name)
 
 # ── NODE 3: CATALOG AGENT (Drafts only - human-in-the-loop approval required) ──
 def run_catalog_agent(state: SakhiState) -> SakhiState:
@@ -1228,63 +1090,6 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     return state
 
 
-
-class AttributeFollowupIntent(BaseModel):
-    is_followup: bool
-
-def classify_attribute_followup(user_input: str, product_name: str) -> bool:
-    """Deterministic Drill-Down gate for run_customer_agent, checked BEFORE
-    category extraction / vector search even run (see the call site). This
-    exists because leaving the decision to the main customer_prompt's Rule 3b
-    was not reliable in practice: a bare attribute word next to a category
-    name (e.g. "suit ka size kya hai") can make extract_category_intent
-    misread it as a fresh category browse, populating CONTEXT with several
-    unrelated same-category products BEFORE the main LLM call ever gets a
-    chance to recognize this was actually about the one item already
-    established - resurfacing the ambiguous-match picker instead of just
-    answering. Running this cheap, narrowly-scoped check first, using ONLY
-    the established product's name (never a fresh search), avoids that
-    entirely."""
-    prompt = f"""A customer was just discussing this product: "{product_name}"
-
-Their next message was: "{user_input}"
-
-Is this message a QUESTION asking about an ATTRIBUTE of THIS SAME product - size, color, material,
-fabric, price, availability, or return/exchange policy (e.g. "size kya hai", "colors kya hain", "kitne ka
-hai", "cotton hai kya", "return ho sakta hai kya", "kaunse sizes available hain") - without naming any
-different/new product or category?
-
-Answer false for all of these: a request to browse/see a different item or category (e.g. "kurti dikhao",
-"aur options dikhao"), a purchase confirmation (e.g. "order kar do", "ye lena hai"), a COMPLAINT or
-dissatisfaction about size/fit/color/quality (e.g. "size chota hai", "color pasand nahi aaya" - these are
-returns, not inquiries), a greeting, or anything unrelated to this specific product's attributes.
-
-Output ONLY valid JSON: {{"is_followup": true|false}}"""
-    raw_text = generate_with_fallback(prompt)
-    if raw_text:
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
-            parsed = AttributeFollowupIntent(**json.loads(cleaned))
-            return parsed.is_followup
-        except (json.JSONDecodeError, ValidationError, KeyError) as e:
-            logger.warning(f"Attribute follow-up classification failed to parse ({e}); using keyword fallback.")
-
-    # Emergency fallback only - used if Gemini is entirely unreachable.
-    # Deliberately excludes "return"/"exchange" here: a keyword-only check
-    # can't reliably tell "return ho sakta hai kya" (an inquiry) apart from
-    # "return karna hai" (a genuine return request that Priority 1 must still
-    # catch), so during a total outage this stays conservative and lets those
-    # fall through to the normal flow instead of risking a swallowed return.
-    lower = user_input.strip().lower()
-    complaint_words = ["chota", "bada", "tight", "loose", "kharab", "phata", "pasand nahi", "achha nahi"]
-    if any(w in lower for w in complaint_words):
-        return False
-    attribute_words = ["size", "colour", "color", "rang", "material", "fabric", "kapda", "price", "kimat", "kitne ka", "available", "stock"]
-    return any(w in lower for w in attribute_words)
 
 def _answer_established_item_followup(
     state: SakhiState, product: Dict[str, Any], user_input: str,
