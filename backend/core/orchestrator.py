@@ -32,6 +32,7 @@ from backend.core.routing.category import CategoryIntent, extract_category_inten
 from backend.core.routing.returns import ReturnGrievanceIntent, classify_return_grievance
 from backend.core.routing.exchange import ExchangeConfirmationIntent, classify_exchange_confirmation
 from backend.core.metrics.sales import _extract_timeframe_days, _aggregate_sales_for_window
+from backend.core.rag.formatting import _format_product_line
 from backend.data.mock_sales_data import MOCK_SALES_DATA
 
 logger = logging.getLogger("sakhi-backend")
@@ -1229,19 +1230,6 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     return state
 
 
-# Renders one product dict as a single grounding line for an LLM prompt -
-# shared by run_customer_agent's own CONTEXT/RECENTLY DISCUSSED ITEM blocks
-# and check_fresh_context_lock's Latest Context Lock reply, so both ground
-# strictly on the same real product fields (never inventing one).
-def _format_product_line(p: Dict[str, Any]) -> str:
-    return (
-        f"Product: {p.get('name')} | Availability: In Stock | Price: {p.get('suggested_selling_price_inr')} rupaye | "
-        f"Category: {p.get('category')} | "
-        f"Sizes: {', '.join(p.get('sizes') or []) or 'Not specified'} | "
-        f"Colors: {', '.join(p.get('colors') or []) or 'Not specified'} | "
-        f"Material: {p.get('material') or 'Not specified'} | "
-        f"Return window: {p.get('return_window_days')} days | Description: {p.get('description')}"
-    )
 
 class AttributeFollowupIntent(BaseModel):
     is_followup: bool
