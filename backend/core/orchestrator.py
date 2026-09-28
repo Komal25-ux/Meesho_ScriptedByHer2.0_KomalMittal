@@ -32,6 +32,7 @@ from backend.core.routing.category import CategoryIntent, extract_category_inten
 from backend.core.routing.returns import ReturnGrievanceIntent, classify_return_grievance
 from backend.core.routing.exchange import ExchangeConfirmationIntent, classify_exchange_confirmation
 from backend.core.metrics.sales import _extract_timeframe_days, _aggregate_sales_for_window
+from backend.core.rag.embeddings import _embed_text
 from backend.core.rag.formatting import _format_product_line
 from backend.data.mock_sales_data import MOCK_SALES_DATA
 
@@ -126,9 +127,6 @@ PENDING_RETURNS: Dict[str, Dict[str, Any]] = {}
 
 
 
-
-def _embed_text(text: str) -> list:
-    return embed_content_with_fallback(text, task_type="retrieval_query", output_dimensionality=768)
 
 def _lookup_product_by_name(product_name: str) -> Optional[Dict[str, Any]]:
     """Anchors the Returns Retention flow to the actual item being returned by
