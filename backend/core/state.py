@@ -1,6 +1,10 @@
 from typing import TypedDict, Optional, List, Dict, Any
 
-__all__ = ["SakhiState"]
+__all__ = ["SakhiState", "_pending_key"]
+
+
+def _pending_key(whatsapp_number: str, active_mode: str) -> str:
+    return f"{whatsapp_number}::{active_mode}"
 
 
 class SakhiState(TypedDict):

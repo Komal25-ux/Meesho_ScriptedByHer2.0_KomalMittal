@@ -10,7 +10,7 @@ import google.generativeai as genai
 from backend.config import settings
 from backend.db.supabase_client import db_client
 from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, embed_content_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse, IntentRouter
-from backend.core.state import SakhiState
+from backend.core.state import SakhiState, _pending_key
 from backend.core.constants import (
     CATALOG_SHARE_TRIGGER_RE,
     CUSTOMER_DETAILS_TRIGGER_RE,
@@ -104,9 +104,6 @@ SHOWN_PRODUCT_IDS: Dict[str, list] = {}
 # follow-up like "aur dikhao" ("show more") stay scoped to the same category
 # without the customer having to repeat it every turn.
 LAST_REQUESTED_CATEGORY: Dict[str, str] = {}
-
-def _pending_key(whatsapp_number: str, active_mode: str) -> str:
-    return f"{whatsapp_number}::{active_mode}"
 
 
 # In-memory store for a return in progress awaiting the customer's next reply,
