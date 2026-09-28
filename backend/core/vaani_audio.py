@@ -180,8 +180,8 @@ async def transcribe_audio(file_path: str) -> str:
                             logger.info(f"Sarvam ASR Success: {transcription}")
                             if transcription:
                                 return transcription
-                        elif response.status_code in [401, 403, 429]:
-                            logger.warning(f"Sarvam ASR key exhausted/blocked ({response.status_code}). Rotating...")
+                        elif response.status_code in [401, 402, 403, 429]:
+                            logger.warning(f"Sarvam ASR key exhausted/blocked ({response.status_code}: {response.text}). Rotating...")
                             rotate_sarvam_key()
                             continue
                         else:
@@ -237,8 +237,8 @@ async def synthesize_speech(text: str) -> bytes:
                     payload = {
                         "inputs": [tts_text],
                         "target_language_code": "hi-IN",
-                        "speaker": "anushka",
-                        "model": "bulbul:v2",
+                        "speaker": "priya",
+                        "model": "bulbul:v3",
                         "pitch": 0,
                         "pace": 1.0,
                         "loudness": 1.5,
@@ -260,9 +260,10 @@ async def synthesize_speech(text: str) -> bytes:
                             import base64
                             audio_b64 = audios[0]
                             return base64.b64decode(audio_b64)
-                    elif response.status_code in [401, 403, 429]:
-                        logger.warning(f"Sarvam TTS key exhausted/blocked ({response.status_code}). Rotating...")
+                    elif response.status_code in [401, 402, 403, 429]:
+                        logger.warning(f"Sarvam TTS key exhausted/blocked ({response.status_code}: {response.text}). Rotating...")
                         rotate_sarvam_key()
+                        continue
                         continue
                     else:
                         logger.warning(f"Sarvam TTS returned error {response.status_code}: {response.text}")
