@@ -12,7 +12,7 @@ langchain
 langchain-google-genai
 
 # Google Gemini
-google-generativeai
+google-genai
 
 # Supabase
 supabase

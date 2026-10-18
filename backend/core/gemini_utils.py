@@ -1,6 +1,7 @@
 import logging
 from typing import Literal, Optional, Type, TypeVar
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from pydantic import BaseModel, Field
 from backend.config import settings
 
@@ -166,19 +167,23 @@ def _get_gemini_keys() -> list:
         if k and "YOUR_GEMINI" not in k
     ]
 
-def configure_gemini() -> bool:
-    global _CURRENT_KEY_INDEX
+def _get_active_client() -> Optional[genai.Client]:
+    """Instantiates a google-genai Client bound to the currently active API key."""
     keys = _get_gemini_keys()
     if not keys:
         logger.error("No valid Gemini API keys found in settings.")
-        return False
+        return None
     try:
         current_key = keys[_CURRENT_KEY_INDEX % len(keys)]
-        genai.configure(api_key=current_key)
-        return True
+        return genai.Client(api_key=current_key)
     except Exception as e:
-        logger.error(f"Gemini API configuration failed with key index {_CURRENT_KEY_INDEX}: {e}")
-        return False
+        logger.error(f"Gemini Client creation failed with key index {_CURRENT_KEY_INDEX}: {e}")
+        return None
+
+def configure_gemini() -> bool:
+    """Verifies that a valid Gemini client can be configured with the current key."""
+    client = _get_active_client()
+    return client is not None
 
 def rotate_gemini_key():
     global _CURRENT_KEY_INDEX
@@ -186,7 +191,6 @@ def rotate_gemini_key():
     if keys:
         _CURRENT_KEY_INDEX = (_CURRENT_KEY_INDEX + 1) % len(keys)
         logger.info(f"Rotating Gemini API Key index to: {_CURRENT_KEY_INDEX}")
-        configure_gemini()
 
 def _get_fallback_models() -> list[str]:
     raw = getattr(settings, "GEMINI_FALLBACK_MODELS", "")
@@ -203,21 +207,25 @@ def _model_chain() -> list[str]:
     return chain
 
 def generate_with_fallback(parts):
-    """Tries each model in the fallback chain in order. If all models fail due to
-    quota exhaustion or invalid keys, rotates to the fallback API key and retries."""
+    """Tries each model in the fallback chain in order using the google-genai SDK.
+    If all models fail due to quota exhaustion or invalid keys, rotates to the
+    fallback API key and retries."""
     keys = _get_gemini_keys()
     num_keys = len(keys) if keys else 1
     
     last_error = None
     for key_attempt in range(num_keys):
-        if not configure_gemini():
+        client = _get_active_client()
+        if not client:
             return None
             
         for model_name in _model_chain():
             try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(parts)
-                text = response.text.strip()
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=parts,
+                )
+                text = (response.text or "").strip()
                 if text:
                     logger.info(f"Gemini generation success using model '{model_name}' (Key index {_CURRENT_KEY_INDEX})")
                     return text
@@ -242,23 +250,25 @@ def generate_with_fallback(parts):
 
 def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[T]:
     """Same fallback chain and key rotation as generate_with_fallback, but
-    constrains each model's output to the given Pydantic schema."""
+    constrains each model's output to the given Pydantic schema using
+    google.genai types.GenerateContentConfig."""
     keys = _get_gemini_keys()
     num_keys = len(keys) if keys else 1
     
     last_error = None
     for key_attempt in range(num_keys):
-        if not configure_gemini():
+        client = _get_active_client()
+        if not client:
             return None
             
         for model_name in _model_chain():
             try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt,
-                    generation_config=genai.GenerationConfig(
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=schema
+                        response_schema=schema,
                     )
                 )
                 validated = schema.model_validate_json(response.text)
@@ -281,23 +291,28 @@ def generate_structured_with_fallback(prompt: str, schema: Type[T]) -> Optional[
     return None
 
 def embed_content_with_fallback(text: str, task_type: str = "retrieval_query", output_dimensionality: int = 768) -> list[float]:
-    """Generates embeddings with API key rotation fallback if a key is exhausted or fails."""
+    """Generates embeddings with API key rotation fallback using google-genai Client."""
     if not text or not text.strip():
         return []
     keys = _get_gemini_keys()
     num_keys = len(keys) if keys else 1
     last_error = None
     for key_attempt in range(num_keys):
-        if not configure_gemini():
+        client = _get_active_client()
+        if not client:
             return []
         try:
-            embed_res = genai.embed_content(
+            embed_res = client.models.embed_content(
                 model="models/gemini-embedding-001",
-                content=text,
-                task_type=task_type,
-                output_dimensionality=output_dimensionality
+                contents=text,
+                config=types.EmbedContentConfig(
+                    task_type=task_type,
+                    output_dimensionality=output_dimensionality,
+                )
             )
-            return embed_res.get("embedding", [])
+            if embed_res and embed_res.embeddings:
+                return embed_res.embeddings[0].values or []
+            return []
         except Exception as e:
             last_error = e
             logger.warning(f"Gemini embedding failed with key index {_CURRENT_KEY_INDEX}: {e}")
