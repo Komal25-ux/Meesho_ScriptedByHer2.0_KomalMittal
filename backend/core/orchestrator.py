@@ -1,50 +1,33 @@
-import re
 import time
-import json
 import logging
-import datetime
-from typing import Optional, List, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
-from pydantic import BaseModel, ValidationError
-import google.generativeai as genai
-from backend.config import settings
 from backend.db.supabase_client import db_client
-from backend.core.gemini_utils import configure_gemini, generate_with_fallback, generate_structured_with_fallback, embed_content_with_fallback, AgentResponse, CatalogCaptionResponse, CustomerAgentResponse, ReturnsAgentResponse, IntentRouter
+from backend.core.gemini_utils import (
+    generate_structured_with_fallback,
+    CustomerAgentResponse,
+    ReturnsAgentResponse,
+    IntentRouter,
+)
 from backend.core.state import SakhiState, _pending_key
 from backend.core.constants import (
     CATALOG_SHARE_TRIGGER_RE,
     CUSTOMER_DETAILS_TRIGGER_RE,
-    REAL_CATEGORIES,
-    AFFIRMATIVE_KEYWORDS,
-    NEGATIVE_KEYWORDS,
-    _CATEGORY_KEYWORDS,
-    _MORE_KEYWORDS,
-    _NON_BROWSE_KEYWORDS,
     _RETURNS_STAGE_LABELS,
     _RETURNS_FALLBACK_TEXT,
-    CUSTOMER_ZERO_HALLUCINATION_REFUSAL,
-    CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS,
-    DRILL_DOWN_CTA,
-    DRILL_DOWN_CTA_TTS,
 )
-from backend.core.routing.approval import ApprovalIntent, classify_approval_intent, _extract_price
-from backend.core.routing.category import CategoryIntent, extract_category_intent
-from backend.core.routing.returns import ReturnGrievanceIntent, classify_return_grievance
-from backend.core.routing.exchange import ExchangeConfirmationIntent, classify_exchange_confirmation
+from backend.core.routing.approval import classify_approval_intent, _extract_price
+from backend.core.routing.returns import classify_return_grievance
+from backend.core.routing.exchange import classify_exchange_confirmation
 from backend.core.routing.triggers import _strip_trigger_prefix
-from backend.core.routing.buying_interest import BuyingInterestIntent, classify_buying_interest
-from backend.core.routing.attribute_followup import AttributeFollowupIntent, classify_attribute_followup
-from backend.core.metrics.sales import _extract_timeframe_days, _aggregate_sales_for_window
-from backend.core.rag.embeddings import _embed_text
+from backend.core.routing.buying_interest import classify_buying_interest
 from backend.core.rag.formatting import _format_product_line, _format_alternative_context
-from backend.core.rag.retrieval import _lookup_product_by_name, _find_alternative_product
+from backend.core.rag.retrieval import _find_alternative_product
 from backend.core.catalog.captions import generate_whatsapp_caption
 from backend.core.agents.growth import run_growth_agent
 from backend.core.agents.general import run_general_handler
 from backend.core.agents.returns import run_returns_proactive_outreach
 from backend.core.agents.catalog import run_catalog_agent
 from backend.core.agents.customer import run_customer_agent, _answer_established_item_followup
-from backend.data.mock_sales_data import MOCK_SALES_DATA
 
 logger = logging.getLogger("sakhi-backend")
 
