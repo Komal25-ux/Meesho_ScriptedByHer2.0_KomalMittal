@@ -461,10 +461,11 @@ def main():
         sys.exit(0)
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
+        from google import genai
+        from google.genai import types
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e:
-        print(f"[ERROR] Failed to load/configure Google Generative AI: {e}")
+        print(f"[ERROR] Failed to load/configure Google GenAI Client: {e}")
         sys.exit(1)
 
     try:
@@ -500,13 +501,15 @@ def main():
                 f"Colors Available: {', '.join(prod['colors'])} | Description: {prod['description']}"
             )
 
-            response = genai.embed_content(
+            response = ai_client.models.embed_content(
                 model="models/gemini-embedding-001",
-                content=text_to_embed,
-                task_type="retrieval_document",
-                output_dimensionality=768
+                contents=text_to_embed,
+                config=types.EmbedContentConfig(
+                    task_type="retrieval_document",
+                    output_dimensionality=768
+                )
             )
-            embedding = response["embedding"]
+            embedding = response.embeddings[0].values if response.embeddings else []
 
             payload = {
                 "product_id": prod["product_id"],
