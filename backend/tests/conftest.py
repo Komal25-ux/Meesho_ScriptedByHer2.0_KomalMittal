@@ -76,3 +76,31 @@ def make_state():
         return base
     return _factory
 
+
+@pytest.fixture
+def mock_db_orchestrator(monkeypatch):
+    """Provides standard mock implementations for db_client methods invoked by orchestrator nodes."""
+    from backend.db.supabase_client import db_client
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(db_client, "get_or_create_reseller", lambda phone: {
+        "id": "reseller-123",
+        "name": "Sunita Didi",
+        "location": "Kanpur",
+        "language": "hi",
+        "dialect": "hindi",
+    })
+    monkeypatch.setattr(db_client, "get_reseller_profile", lambda r_id: {
+        "id": r_id,
+        "commission_rate": 0.2,
+    })
+    monkeypatch.setattr(db_client, "save_conversation_turn", lambda payload: {"id": "turn-1"})
+    monkeypatch.setattr(db_client, "log_agent_event", lambda payload: {"id": "log-1"})
+    monkeypatch.setattr(db_client, "save_listing", lambda payload: {"id": "listing-1", **payload})
+    monkeypatch.setattr(db_client, "save_order", lambda payload: {"id": "order-1", **payload})
+    monkeypatch.setattr(db_client, "save_return", lambda payload: {"id": "return-1", **payload})
+    monkeypatch.setattr(db_client, "is_product_listed", lambda r_id, p_id: True)
+    monkeypatch.setattr(db_client, "get_listing_id", lambda r_id, p_id: "listing-1")
+    return db_client
+
+
