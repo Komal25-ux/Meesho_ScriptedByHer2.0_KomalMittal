@@ -1,0 +1,42 @@
+name: Sakhi Backend CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Backend Tests & Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: "https://mock.supabase.co"
+      SUPABASE_SERVICE_KEY: "mock-service-key"
+      GEMINI_API_KEY: "mock-gemini-key"
+      GEMINI_API_KEY_FALLBACK: "mock-gemini-fallback"
+      GEMINI_API_KEY_FALLBACK_2: "mock-gemini-fallback-2"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-mock
+
+      - name: Run automated test suite
+        run: pytest -q
+
+      - name: Validate Python compilation
+        run: python -m compileall backend scripts
