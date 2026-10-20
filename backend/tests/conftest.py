@@ -101,6 +101,39 @@ def mock_db_orchestrator(monkeypatch):
     monkeypatch.setattr(db_client, "save_return", lambda payload: {"id": "return-1", **payload})
     monkeypatch.setattr(db_client, "is_product_listed", lambda r_id, p_id: True)
     monkeypatch.setattr(db_client, "get_listing_id", lambda r_id, p_id: "listing-1")
+    monkeypatch.setattr(db_client, "get_conversation_history", lambda r_id, limit=10: [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"}
+    ])
     return db_client
+
+
+@pytest.fixture
+def mock_vaani(monkeypatch):
+    """Mocks speech synthesis and transcription to avoid external network calls."""
+    async def _mock_synth(text):
+        return b"mock-tts-bytes"
+
+    async def _mock_wav(path):
+        return path + ".wav"
+
+    async def _mock_transcribe(path):
+        return "transcribed audio text"
+
+    monkeypatch.setattr("backend.core.vaani_audio.synthesize_speech", _mock_synth)
+    monkeypatch.setattr("backend.core.vaani_audio.convert_to_wav", _mock_wav)
+    monkeypatch.setattr("backend.core.vaani_audio.transcribe_audio", _mock_transcribe)
+    monkeypatch.setattr("backend.api.chat_router.synthesize_speech", _mock_synth)
+    monkeypatch.setattr("backend.api.chat_router.convert_to_wav", _mock_wav)
+    monkeypatch.setattr("backend.api.chat_router.transcribe_audio", _mock_transcribe)
+
+
+@pytest.fixture
+def api_client(mock_db_orchestrator, mock_vaani):
+    """TestClient instance configured with mocked database and voice pipelines."""
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    return TestClient(app)
+
 
 
