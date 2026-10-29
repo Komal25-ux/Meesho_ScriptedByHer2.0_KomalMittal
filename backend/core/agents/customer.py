@@ -1,7 +1,8 @@
 import time
+from datetime import timedelta
 from typing import Dict, Any
 
-from backend.core.state import SakhiState, _pending_key
+from backend.core.state import SakhiState, _pending_key, conversation_id
 from backend.core.session import (
     LAST_VIEWED_PRODUCT,
     LAST_REQUESTED_CATEGORY,
@@ -26,12 +27,14 @@ from backend.core.gemini_utils import (
     embed_content_with_fallback,
     CustomerAgentResponse,
 )
+from backend.core.pricing import suggested_price
+from backend.core.prompt_safety import USER_TEXT_RULE, keep_if_prices_grounded, quote_user_text
 from backend.db.supabase_client import db_client
 
 
 def _answer_established_item_followup(
     state: SakhiState, product: Dict[str, Any], user_input: str,
-    session_key: str, whatsapp_number: str, t_start: float
+    session_key: str, t_start: float
 ) -> SakhiState:
     """Deterministic Drill-Down State reply (see classify_attribute_followup's
     call site in run_customer_agent) - grounds strictly on `product` (the
@@ -48,7 +51,9 @@ customer is asking a follow-up question about a product they were already just d
 ESTABLISHED PRODUCT (the ONLY product relevant to this turn - do not consider or search for any other item):
 {product_line}
 
-CUSTOMER'S FOLLOW-UP QUESTION: "{user_input}"
+CUSTOMER'S FOLLOW-UP QUESTION:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 Answer their specific question directly and warmly, grounded ONLY in the product above (e.g. if they asked
 about size, clearly state the available sizes; if a specific attribute is genuinely absent from the product
@@ -68,7 +73,11 @@ false, and purchase_intent_detected to false.
 You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context,
 return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
 """
-    result = generate_structured_with_fallback(prompt, CustomerAgentResponse)
+    result = keep_if_prices_grounded(
+        generate_structured_with_fallback(prompt, CustomerAgentResponse),
+        [product.get("suggested_selling_price_inr")],
+        where="Drill-down follow-up",
+    )
 
     sizes = ', '.join(product.get('sizes') or []) or 'abhi update nahi hui hai'
     fallback_ui = f"Iske available sizes hain: {sizes}. {DRILL_DOWN_CTA}"
@@ -100,13 +109,35 @@ return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "customer_drill_down_followup",
         "agent_name": "CustomerAgent",
         "latency_ms": latency,
         "payload": log_event["data"]
     })
     return state
+
+# A second confirmation of the same product in the same conversation within
+# this long is the same order (see db_client.find_recent_order).
+REPEAT_ORDER_WINDOW = timedelta(minutes=10)
+
+
+def _set_buyer_price(product: Dict[str, Any], reseller_id: str) -> None:
+    """Sets, in place, the price a buyer is quoted for `product`: the price
+    the reseller listed it at if she has; otherwise the catalog's suggested
+    price, which is also what her own draft would start at (run_catalog_agent);
+    the cost-based rule only when the catalog has no price.
+
+    Before this, a listed product was quoted at the catalog price even when
+    she had listed it at another price, and an unlisted one at the cost rule
+    (₹600) while her draft for it said the catalog price (₹599)."""
+    listing = db_client.get_listing(reseller_id, product["product_id"]) if reseller_id and product.get("product_id") else None
+    product["is_unlisted"] = listing is None
+    if listing:
+        product["suggested_selling_price_inr"] = listing["selling_price_inr"]
+    elif not product.get("suggested_selling_price_inr"):
+        product["suggested_selling_price_inr"] = suggested_price(product.get("meesho_cost_inr", 350))
+
 
 # ── NODE 4: CUSTOMER AGENT (RAG BASED) ────────────────────────
 def run_customer_agent(state: SakhiState) -> SakhiState:
@@ -116,7 +147,7 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
 
-    session_key = _pending_key(whatsapp_number, active_mode)
+    session_key = _pending_key(conversation_id(state), active_mode)
 
     # CRITICAL RULE FOR ITEM CLICKS (see prompt_customer_agent.md): a Product
     # Card Click in Customer mode (handleProductCardClick in App.jsx) always
@@ -149,8 +180,9 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
     if not exact_match and not is_details_trigger:
         early_recent_product = LAST_VIEWED_PRODUCT.get(session_key)
         if early_recent_product and classify_attribute_followup(user_input, early_recent_product.get("name", "")):
+            _set_buyer_price(early_recent_product, state.get("reseller_id", ""))
             return _answer_established_item_followup(
-                state, early_recent_product, user_input, session_key, whatsapp_number, t_start
+                state, early_recent_product, user_input, session_key, t_start
             )
 
     category_filter = None
@@ -217,7 +249,7 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
             }
             state["trace_logs"].append(log_event)
             db_client.log_agent_event({
-                "session_id": whatsapp_number,
+                "session_id": conversation_id(state),
                 "event_type": "customer_category_exhausted",
                 "agent_name": "CustomerAgent",
                 "latency_ms": latency,
@@ -227,40 +259,21 @@ def run_customer_agent(state: SakhiState) -> SakhiState:
 
     reseller_id = state.get("reseller_id", "")
     for p in similar_skus:
-        p_id = p.get("product_id")
-        is_listed = False
-        if reseller_id and p_id:
-            is_listed = db_client.is_product_listed(reseller_id, p_id)
-        p["is_unlisted"] = not is_listed
-        if not is_listed:
-            cost = p.get("meesho_cost_inr", 350)
-            price_30_margin = int(cost / 0.7)
-            price_min_profit = cost + 150
-            dynamic_price = max(price_min_profit, price_30_margin)
-            p["suggested_selling_price_inr"] = dynamic_price
-
-    recent_product = LAST_VIEWED_PRODUCT.get(session_key)
-    if recent_product:
-        rp_id = recent_product.get("product_id")
-        is_rp_listed = False
-        if reseller_id and rp_id:
-            is_rp_listed = db_client.is_product_listed(reseller_id, rp_id)
-        recent_product["is_unlisted"] = not is_rp_listed
-        if not is_rp_listed:
-            cost = recent_product.get("meesho_cost_inr", 350)
-            price_30_margin = int(cost / 0.7)
-            price_min_profit = cost + 150
-            dynamic_price = max(price_min_profit, price_30_margin)
-            recent_product["suggested_selling_price_inr"] = dynamic_price
-
-    context_str = "\n".join(_format_product_line(p) for p in similar_skus) if similar_skus \
-        else "No matching product found in the catalog for this query."
+        _set_buyer_price(p, reseller_id)
 
     # Last item this session was actually grounded on (see LAST_VIEWED_PRODUCT
     # docstring above) - the referent for a bare confirmation like "isko order
     # kar do" that doesn't repeat the product name, since that phrase's own
     # vector search below has nothing product-specific to match against.
+    # Read once: session reads are copies, so a second read would lose the
+    # buyer price set here (it did, and orders went in at the catalog price).
     recent_product = LAST_VIEWED_PRODUCT.get(session_key)
+    if recent_product:
+        _set_buyer_price(recent_product, reseller_id)
+
+    context_str = "\n".join(_format_product_line(p) for p in similar_skus) if similar_skus \
+        else "No matching product found in the catalog for this query."
+
     recent_context_str = _format_product_line(recent_product) if recent_product else "None."
 
     # Single system prompt covering every turn - Priority 1 (Return Retention
@@ -351,7 +364,8 @@ CONTEXT:
 {context_str}
 
 USER QUERY:
-"{user_input}"
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 1. Factual Constraints: Do not invent attributes outside CONTEXT or RECENTLY DISCUSSED ITEM (whichever grounds the answer per the rules below). A product appearing there means it EXISTS and IS AVAILABLE - a general availability question ("kya ye milegi?") is answered as long as a matching product is available; do not treat availability itself as a missing detail.
 2. Browsing Case (General/Exploratory Query, 2+ Candidates): If the query is a general browsing request rather than a question about one specific, already-identified item (e.g. "saree dikhao", "kuch achi kurti dikhao", "kya options hain") AND CONTEXT lists 2 or more candidate products, do NOT try to describe or compare all of them yourself in ui_text/tts_text - even though you technically could. The system will show them to the customer as a visual picker instead, which they can tap directly; a wall of text listing multiple names/prices is worse UX than that picker and defeats its purpose. In this case ui_text/tts_text can be a brief one-line acknowledgement (it will likely be replaced by the picker anyway). Set answered_from_product_context to false, return_retention_triggered to false, purchase_intent_detected to false, and grounded_via_recent_item to false. This does NOT apply when rule 3b below resolves the query to RECENTLY DISCUSSED ITEM instead - a pronoun referring to a known item is never a fresh browsing request, no matter how many loose/unrelated matches this message's own CONTEXT happens to contain.
@@ -369,7 +383,17 @@ USER QUERY:
 Image handling is managed entirely by the system based on your answered_from_product_context and grounded_via_recent_item flags - do not attempt to output an image URL yourself, it is not part of your output schema.
 You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context, return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
 """
-    result = generate_structured_with_fallback(customer_prompt, CustomerAgentResponse)
+    # A reply that names any price other than the real ones is dropped and
+    # replaced by the zero-hallucination refusal below, flags and all - so a
+    # manipulated reply can't quote a fake price or place an order either.
+    grounded_prices = [p.get("suggested_selling_price_inr") for p in similar_skus]
+    if recent_product:
+        grounded_prices.append(recent_product.get("suggested_selling_price_inr"))
+    result = keep_if_prices_grounded(
+        generate_structured_with_fallback(customer_prompt, CustomerAgentResponse),
+        grounded_prices,
+        where="Customer agent",
+    )
     reply_text = result.ui_text if result and result.ui_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL
     reply_tts_text = result.tts_text if result and result.tts_text else CUSTOMER_ZERO_HALLUCINATION_REFUSAL_TTS
     answered_from_product_context = result.answered_from_product_context if result else False
@@ -416,7 +440,8 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         if confirmed_product:
             reseller_id = state.get("reseller_id")
             unit_price = confirmed_product.get("suggested_selling_price_inr")
-            listing_id = db_client.get_listing_id(reseller_id, confirmed_product.get("product_id")) if reseller_id else None
+            listing = db_client.get_listing(reseller_id, confirmed_product.get("product_id")) if reseller_id else None
+            listing_id = listing["id"] if listing else None
             order_data = {
                 "reseller_id": reseller_id,
                 "listing_id": listing_id,
@@ -429,25 +454,21 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
                 "unit_price_inr": unit_price,
                 "available_sizes": confirmed_product.get("sizes") or [],
                 "available_colors": confirmed_product.get("colors") or [],
+                "session_id": conversation_id(state),
+                "client_message_id": state.get("client_message_id"),
             }
-            saved_order = db_client.save_order(order_data)
-            # Falls back to the exact same Python-resolved values already in
-            # order_data whenever the DB write didn't go through (save_order
-            # returns {} on any insert error - e.g. a live schema drift where
-            # the orders table is missing a column this code expects, which
-            # is a real failure mode this app hit: the table must be migrated
-            # separately via supabase_schema.sql, editing that file alone
-            # does not apply it). Python already knows exactly what was
-            # confirmed regardless of whether the write succeeded - a
-            # transient/config write failure must never blank out the
-            # reseller notification; it only means this order has no durable
-            # order_id to reference later. dict.get(key, default) here relies
-            # on the KEY being absent (not just falsy) on failure, which
-            # holds: saved_order is {} in that case, so every key is absent.
-            state["reply_order_id"] = saved_order.get("id")
-            state["reply_confirmed_product_name"] = saved_order.get("product_name", order_data["product_name"])
-            state["reply_confirmed_product_price"] = saved_order.get("unit_price_inr", order_data["unit_price_inr"])
-            state["reply_confirmed_product_is_unlisted"] = not saved_order.get("listing_id", listing_id)
+            # If the insert fails, save_order raises and the whole turn fails
+            # with a "please retry". Telling the customer their order is
+            # confirmed, and notifying the reseller, when no order row exists
+            # would be worse: nobody would ever find out it was lost.
+            saved_order = (
+                db_client.find_recent_order(conversation_id(state), order_data["product_id"], REPEAT_ORDER_WINDOW)
+                or db_client.save_order(order_data)
+            )
+            state["reply_order_id"] = saved_order["id"]
+            state["reply_confirmed_product_name"] = saved_order["product_name"]
+            state["reply_confirmed_product_price"] = saved_order["unit_price_inr"]
+            state["reply_confirmed_product_is_unlisted"] = not saved_order["listing_id"]
         else:
             # Condition (b) still failed despite purchase_intent_detected somehow
             # coming back true (a model inconsistency, not a case Python can
@@ -477,7 +498,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         }
         state["trace_logs"].append(log_event)
         db_client.log_agent_event({
-            "session_id": whatsapp_number,
+            "session_id": conversation_id(state),
             "event_type": "customer_purchase_intent",
             "agent_name": "CustomerAgent",
             "latency_ms": latency,
@@ -517,8 +538,9 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         if category_filter:
             # Pagination memory: never show these same items again for the
             # rest of this category's browse (see SHOWN_PRODUCT_IDS docstring).
-            shown = SHOWN_PRODUCT_IDS.setdefault(session_key, [])
-            shown.extend(p.get("product_id") for p in similar_skus[:4] if p.get("product_id"))
+            SHOWN_PRODUCT_IDS[session_key] = SHOWN_PRODUCT_IDS.get(session_key, []) + [
+                p.get("product_id") for p in similar_skus[:4] if p.get("product_id")
+            ]
         state["reply_text"] = "Ji, mujhe kuch milte-julte options mile hain. Kripya bataiye aapko kis item ke baare mein jaanna hai:"
         state["reply_tts_text"] = "जी, मुझे कुछ मिलते-जुलते ऑप्शन मिले हैं। कृपया बताइये आपको किस आइटम के बारे में जानना है।"
         state["reply_product_options"] = options
@@ -534,7 +556,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
         }
         state["trace_logs"].append(log_event)
         db_client.log_agent_event({
-            "session_id": whatsapp_number,
+            "session_id": conversation_id(state),
             "event_type": "customer_selection_prompt",
             "agent_name": "CustomerAgent",
             "latency_ms": latency,
@@ -585,7 +607,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     # Remember this as the item a future bare confirmation ("isko order kar
     # do") should resolve to - see LAST_VIEWED_PRODUCT docstring above.
     if answered_from_product_context and grounding_product:
-        LAST_VIEWED_PRODUCT[_pending_key(whatsapp_number, active_mode)] = grounding_product
+        LAST_VIEWED_PRODUCT[_pending_key(conversation_id(state), active_mode)] = grounding_product
 
     # TASK 2 - Returns Handoff: if the Return Retention Hook fired this turn,
     # seed the same PENDING_RETURNS state the system webhook uses (see
@@ -597,7 +619,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     # detect_intent runs; seeding this dict is what makes it fire next turn.
     if return_retention_triggered:
         matched_product = similar_skus[0] if similar_skus else None
-        PENDING_RETURNS[_pending_key(whatsapp_number, active_mode)] = {
+        PENDING_RETURNS[_pending_key(conversation_id(state), active_mode)] = {
             "order_id": None,
             "product_name": matched_product.get("name") if matched_product else "the product",
             "reseller_name": reseller_name,
@@ -619,7 +641,7 @@ You must output your response using the provided JSON schema: ui_text, tts_text,
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "customer_rag",
         "agent_name": "CustomerAgent",
         "latency_ms": latency,

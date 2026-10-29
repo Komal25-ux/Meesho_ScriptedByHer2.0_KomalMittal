@@ -1,8 +1,10 @@
-import json
 import logging
 from typing import Optional, Literal
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from backend.core.gemini_utils import generate_with_fallback
+from backend.core.routing.keywords import mentions
+from backend.core.routing.llm_json import parse_verdict
+from backend.core.prompt_safety import USER_TEXT_RULE, quote_user_text
 from backend.core.constants import (
     REAL_CATEGORIES,
     _CATEGORY_KEYWORDS,
@@ -48,7 +50,9 @@ def extract_category_intent(user_input: str, last_category: Optional[str]) -> Op
 Real categories (ONLY these are valid): sarees, kurtis, suits, tops, lehengas, dresses.
 This session's currently active category (if any): {last_category or "none"}.
 
-Message: "{user_input}"
+Message:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 Classify into EXACTLY ONE:
 - One of the 6 category names above, ONLY if the message's PRIMARY intent is to browse/see products in that category (e.g. "saree dikhao", "kurti chahiye", "suits available hai kya", "mujhe achi si saree chahiye"). A category word appearing in the message is NOT enough by itself.
@@ -56,31 +60,22 @@ Classify into EXACTLY ONE:
 - "none": EITHER the message doesn't reference any product category at all, OR it names a category but its primary intent is something else entirely - a return/refund/exchange/complaint (e.g. "saree wapas karni hai"), a purchase confirmation (e.g. "isse order kardo"), or a question about one already-identified specific item. Those are NOT browse requests even though they may mention a category - output "none" for all of them.
 
 Output ONLY valid JSON: {{"category": "sarees"|"kurtis"|"suits"|"tops"|"lehengas"|"dresses"|"same"|"none"}}"""
-    raw_text = generate_with_fallback(prompt)
-    if raw_text:
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
-            parsed = CategoryIntent(**json.loads(cleaned))
-            if parsed.category == "none":
-                return None
-            if parsed.category == "same":
-                return last_category
-            return parsed.category
-        except (json.JSONDecodeError, ValidationError, KeyError) as e:
-            logger.warning(f"Category intent extraction failed to parse ({e}); using keyword fallback.")
+    verdict = parse_verdict(generate_with_fallback(prompt), CategoryIntent)
+    if verdict:
+        if verdict.category == "none":
+            return None
+        if verdict.category == "same":
+            return last_category
+        return verdict.category
+    logger.warning("Category intent: no usable LLM verdict; using keyword fallback.")
 
-    lower = user_input.strip().lower()
-    if any(kw in lower for kw in _NON_BROWSE_KEYWORDS):
+    if mentions(user_input, _NON_BROWSE_KEYWORDS):
         # Return/purchase/specific-item signal present - never a browse
         # request regardless of any category word also present.
         return None
     for cat, keywords in _CATEGORY_KEYWORDS.items():
-        if any(kw in lower for kw in keywords):
+        if mentions(user_input, keywords):
             return cat
-    if last_category and any(kw in lower for kw in _MORE_KEYWORDS):
+    if last_category and mentions(user_input, _MORE_KEYWORDS):
         return last_category
     return None

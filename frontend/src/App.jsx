@@ -18,8 +18,33 @@ import NotificationBell from './components/chat/NotificationBell';
 import TerminalTraceLog from './components/dashboard/TerminalTraceLog';
 import CatalogDashboard from './components/dashboard/CatalogDashboard';
 import GrowthDashboard from './components/dashboard/GrowthDashboard';
+import { SESSION_ID, newId } from './lib/session';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// What to tell the user when a request fails, by HTTP status. Anything not
+// listed (network down, 5xx) gets the caller's own fallback text.
+const FAILURE_TEXT = {
+  429: "Didi, bahut saare messages ek saath aa gaye. Ek minute ruk kar phir se bhejiye.",
+  413: "Ye voice note bahut lamba hai. Thoda chhota karke phir se bhejiye.",
+};
+const failureText = (err, fallback) => FAILURE_TEXT[err?.response?.status] || fallback;
+
+// Sends a chat message, retrying once if it never got an answer (network
+// drop) or the backend was briefly unavailable. The FormData carries the
+// message's client_message_id, so the retry is the same message to the
+// backend and can never create a second order.
+const RETRYABLE_STATUS = new Set([502, 503, 504]);
+async function postMessage(url, formData) {
+  try {
+    return await axios.post(url, formData);
+  } catch (err) {
+    const status = err?.response?.status;
+    if (status !== undefined && !RETRYABLE_STATUS.has(status)) throw err;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    return axios.post(url, formData);
+  }
+}
 const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws');
 
 const GREETINGS = {
@@ -179,8 +204,9 @@ export default function App() {
     const connect = () => {
       if (isStopped) return;
       try {
-        logger_info("Connecting WebSocket: " + `${WS_BASE_URL}/ws/agent-logs`);
-        const socket = new WebSocket(`${WS_BASE_URL}/ws/agent-logs`);
+        const wsUrl = `${WS_BASE_URL}/ws/agent-logs?session_id=${SESSION_ID}`;
+        logger_info("Connecting WebSocket: " + wsUrl);
+        const socket = new WebSocket(wsUrl);
         wsRef.current = socket;
 
         socket.onmessage = (event) => {
@@ -295,7 +321,7 @@ export default function App() {
     setViewMode('chat');
     try {
       const formData = new FormData();
-      formData.append('whatsapp_number', 'whatsapp:+919876543210');
+      formData.append('session_id', SESSION_ID);
       formData.append('order_id', '104');
       formData.append('product_name', 'Red Cotton Kurti');
       const response = await axios.post(`${API_BASE_URL}/api/v1/system/trigger-return`, formData);
@@ -331,10 +357,12 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('text_message', msg);
+      formData.append('session_id', SESSION_ID);
+      formData.append('client_message_id', newId());
       formData.append('whatsapp_number', 'whatsapp:+919876543210');
       formData.append('active_mode', activeMode);
 
-      const response = await axios.post(`${API_BASE_URL}/api/v1/chat/send`, formData);
+      const response = await postMessage(`${API_BASE_URL}/api/v1/chat/send`, formData);
       const data = response.data;
 
       setCurrentMessages((prev) => [...prev, {
@@ -352,7 +380,7 @@ export default function App() {
       console.error("Error sending text message:", err);
       setCurrentMessages((prev) => [...prev, {
         role: 'assistant',
-        text: "Maaf kijiyega didi, abhi server se connect nahi ho pa rahi hu. Kripya thodi der me koshish karein.",
+        text: failureText(err, "Maaf kijiyega didi, abhi server se connect nahi ho pa rahi hu. Kripya thodi der me koshish karein."),
         voice_fallback: true
       }]);
     } finally {
@@ -388,10 +416,12 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('audio_file', audioBlob, 'reseller_recording.webm');
+      formData.append('session_id', SESSION_ID);
+      formData.append('client_message_id', newId());
       formData.append('whatsapp_number', 'whatsapp:+919876543210');
       formData.append('active_mode', activeMode);
 
-      const response = await axios.post(`${API_BASE_URL}/api/v1/chat/send`, formData);
+      const response = await postMessage(`${API_BASE_URL}/api/v1/chat/send`, formData);
       const data = response.data;
 
       // Replace the placeholder voice message with actual text transcription + response
@@ -417,7 +447,7 @@ export default function App() {
       console.error("Error sending audio blob:", err);
       setCurrentMessages((prev) => [...prev, {
         role: 'assistant',
-        text: "Kripya bolein firse didi, aapki awaaz saaf nahi sunai di.",
+        text: failureText(err, "Kripya bolein firse didi, aapki awaaz saaf nahi sunai di."),
         voice_fallback: true
       }]);
     } finally {

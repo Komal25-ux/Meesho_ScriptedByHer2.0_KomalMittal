@@ -1,6 +1,6 @@
 import time
 
-from backend.core.state import SakhiState
+from backend.core.state import SakhiState, conversation_id
 from backend.core.gemini_utils import generate_structured_with_fallback, AgentResponse
 from backend.core.metrics.sales import _extract_timeframe_days, _aggregate_sales_for_window
 from backend.data.mock_sales_data import MOCK_SALES_DATA
@@ -26,7 +26,8 @@ def run_growth_agent(state: SakhiState) -> SakhiState:
             f"Total Profit: {metrics['total_profit']:,} rupaye\n"
             f"Orders in this period: {metrics['order_count']}\n"
             f"Top-Selling Item (by quantity): {metrics['top_selling_item']}\n"
-            f"Top Category (by revenue): {metrics['top_category']}"
+            f"Top Category (by revenue): {metrics['top_category']}\n"
+            f"Most Profitable Category (by profit): {metrics['most_profitable_category']}"
         )
 
     growth_prompt = f"""You are Sakhi, an expert AI Business & Growth Coach for Meesho Resellers. Your goal is to analyze the provided sales data summary and present a clear, encouraging, and actionable report to the reseller (Suneeta).
@@ -45,7 +46,7 @@ Communication Rules:
 Required Report Structure:
 1. Greeting & Timeframe: Acknowledge the requested time period ({metrics['days']} din).
 2. Performance Snapshot: State the Total Revenue and Total Profit clearly.
-3. Star Performers: Highlight the top-selling item and the most profitable category based on the data.
+3. Star Performers: Highlight the top-selling item and the Most Profitable Category exactly as given in DATA SUMMARY (not the Top Category by revenue - they can differ).
 4. Growth Advice (Actionable): Give 2 specific tips based on the top performers (e.g. "Since Kurtis are selling fast, you should run a combo offer," or "Focus on sharing more Saree catalogs in WhatsApp groups because they yield higher margins.").
 
 If DATA SUMMARY says no sales were recorded, do not invent a report - acknowledge that gently and encourage the reseller to start promoting, instead of fabricating revenue/profit/top performers.
@@ -59,7 +60,7 @@ Example Output (for illustration of tone/structure only - use the real numbers f
 
 🏆 Aapke Top Performers:
 - Sabse zyada bikne wala item [Top Item] raha.
-- Aapko sabse zyada profit [Top Category] se hua hai.
+- Aapko sabse zyada profit [Most Profitable Category] se hua hai.
 
 💡 Sakhi ki Growth Tips:
 1. [Tip 1 related to top item] - Ise apne WhatsApp status par aur promote karein!
@@ -94,13 +95,13 @@ You must output your response using the provided JSON schema: ui_text (full Hing
                 f"Namaste {reseller_name} didi! Pichle {metrics['days']} din ka business analysis: "
                 f"Total Revenue ₹{metrics['total_revenue']:,}, Total Profit ₹{metrics['total_profit']:,}. "
                 f"Sabse zyada bikne wala item {metrics['top_selling_item']} raha, aur sabse zyada profit "
-                f"{metrics['top_category']} category se hua. Ise WhatsApp status par aur promote karein!"
+                f"{metrics['most_profitable_category']} category se hua. Ise WhatsApp status par aur promote karein!"
             )
             reply_tts_text = (
                 f"नमस्ते {reseller_name} दीदी! पिछले {metrics['days']} दिन का बिज़नेस एनालिसिस: "
                 f"टोटल रेवेन्यू {metrics['total_revenue']:,} रुपये, टोटल प्रॉफिट {metrics['total_profit']:,} रुपये। "
                 f"सबसे ज़्यादा बिकने वाला आइटम {metrics['top_selling_item']} रहा, और सबसे ज़्यादा प्रॉफिट "
-                f"{metrics['top_category']} केटेगरी से हुआ। इसे व्हाट्सएप स्टेटस पर और प्रमोट करें!"
+                f"{metrics['most_profitable_category']} केटेगरी से हुआ। इसे व्हाट्सएप स्टेटस पर और प्रमोट करें!"
             )
 
     state["reply_text"] = reply_text
@@ -118,12 +119,13 @@ You must output your response using the provided JSON schema: ui_text (full Hing
             "total_profit": metrics["total_profit"],
             "top_selling_item": metrics["top_selling_item"],
             "top_category": metrics["top_category"],
+            "most_profitable_category": metrics["most_profitable_category"],
             "order_count": metrics["order_count"]
         }
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
+        "session_id": conversation_id(state),
         "event_type": "growth_analytics",
         "agent_name": "GrowthAgent",
         "latency_ms": latency,

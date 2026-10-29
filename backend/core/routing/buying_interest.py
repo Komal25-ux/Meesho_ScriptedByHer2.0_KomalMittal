@@ -1,8 +1,16 @@
-import json
 import logging
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from backend.core.gemini_utils import generate_with_fallback
+from backend.core.constants import NEGATIVE_KEYWORDS
+from backend.core.routing.keywords import mentions
+from backend.core.routing.llm_json import parse_verdict
+from backend.core.prompt_safety import USER_TEXT_RULE, quote_user_text
+
+_INTEREST_WORDS = [
+    "buy*", "khareed*", "chahiye", "order*", "price", "detail*", "kitne", "interested",
+    "lena", "le lo", "lelo", "de do", "bhejo", "haan", "chalega", "milega", "available",
+]
 
 logger = logging.getLogger("sakhi-backend")
 
@@ -27,7 +35,9 @@ def classify_buying_interest(user_input: str, product_name: str) -> bool:
     prompt = f"""A product was just posted/shared with a customer on WhatsApp:
 Product: {product_name}
 
-Their very next message was: "{user_input}"
+Their very next message was:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 Does this message show interest in buying, ordering, or getting details/price about THIS product (e.g.
 "I want to buy", "details do", "price kya hai", "haan bhejo", "interested hu", "order kar do", "kitne ka
@@ -35,22 +45,12 @@ hai")? Answer false if the message is clearly about something unrelated - a diff
 return/complaint, a greeting, or an unrelated topic.
 
 Output ONLY valid JSON: {{"interested": true|false}}"""
-    raw_text = generate_with_fallback(prompt)
-    if raw_text:
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
-            parsed = BuyingInterestIntent(**json.loads(cleaned))
-            return parsed.interested
-        except (json.JSONDecodeError, ValidationError, KeyError) as e:
-            logger.warning(f"Buying interest classification failed to parse ({e}); using keyword fallback.")
-
-    # Emergency fallback only - used if Gemini is entirely unreachable.
-    lower = user_input.strip().lower()
-    return any(k in lower for k in [
-        "buy", "khareed", "chahiye", "order", "price", "detail", "kitne", "interested",
-        "lena", "le lo", "de do", "bhejo", "haan", "chalega", "milega", "available"
-    ])
+    verdict = parse_verdict(generate_with_fallback(prompt), BuyingInterestIntent)
+    if verdict:
+        return verdict.interested
+    logger.warning("Buying interest: no usable LLM verdict; using keyword fallback.")
+    # Outage-only. A refusal outweighs any interest word: "nahi chahiye"
+    # contains "chahiye" and used to count as interest.
+    if mentions(user_input, NEGATIVE_KEYWORDS):
+        return False
+    return mentions(user_input, _INTEREST_WORDS)

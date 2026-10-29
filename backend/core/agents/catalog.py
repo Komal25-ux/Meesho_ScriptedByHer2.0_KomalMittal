@@ -1,6 +1,6 @@
 import time
 
-from backend.core.state import SakhiState, _pending_key
+from backend.core.state import SakhiState, _pending_key, conversation_id
 from backend.core.session import (
     PENDING_LISTINGS,
     PENDING_SELECTIONS,
@@ -15,6 +15,7 @@ from backend.core.routing.triggers import _strip_trigger_prefix
 from backend.core.routing.category import extract_category_intent
 from backend.core.gemini_utils import embed_content_with_fallback
 from backend.core.catalog.captions import generate_whatsapp_caption
+from backend.core.pricing import requested_price, suggested_price
 from backend.db.supabase_client import db_client
 
 
@@ -22,10 +23,9 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
     t_start = time.time()
     user_input = state.get("raw_input", "")
     reseller_name = state.get("reseller_name", "Sunita Didi")
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
 
-    session_key = _pending_key(whatsapp_number, active_mode)
+    session_key = _pending_key(conversation_id(state), active_mode)
 
     # CRITICAL RULE FOR SHARING (see prompt_catalog_agent.md): a Product Card
     # Click in Reseller mode (handleProductCardClick in App.jsx) always sends
@@ -91,7 +91,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             }
             state["trace_logs"].append(log_event)
             db_client.log_agent_event({
-                "session_id": whatsapp_number,
+                "session_id": conversation_id(state),
                 "event_type": "catalog_category_exhausted",
                 "agent_name": "CatalogAgent",
                 "latency_ms": latency,
@@ -109,7 +109,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         options = [
             {
                 "name": p.get("name"),
-                "price": p.get("suggested_selling_price_inr") or max(p.get("meesho_cost_inr", 350) + 150, int(p.get("meesho_cost_inr", 350) / 0.7)),
+                "price": p.get("suggested_selling_price_inr") or suggested_price(p.get("meesho_cost_inr", 350)),
                 "base_image_url": p.get("base_image_url") or f"https://picsum.photos/seed/{p.get('product_id')}/600/400"
             }
             for p in similar_skus[:4]
@@ -119,8 +119,9 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             "options": options,
         }
         if category_filter:
-            shown = SHOWN_PRODUCT_IDS.setdefault(session_key, [])
-            shown.extend(p.get("product_id") for p in similar_skus[:4] if p.get("product_id"))
+            SHOWN_PRODUCT_IDS[session_key] = SHOWN_PRODUCT_IDS.get(session_key, []) + [
+                p.get("product_id") for p in similar_skus[:4] if p.get("product_id")
+            ]
         state["reply_text"] = "Didi, mujhe catalog me kuch milte-julte options mile hain. Kripya bataiye kaunsa item list karna hai:"
         state["reply_tts_text"] = "दीदी, मुझे कैटलॉग में कुछ मिलते-जुलते ऑप्शन मिले हैं। कृपया बताइये कौनसा आइटम लिस्ट करना है।"
         state["reply_product_options"] = options
@@ -136,7 +137,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         }
         state["trace_logs"].append(log_event)
         db_client.log_agent_event({
-            "session_id": whatsapp_number,
+            "session_id": conversation_id(state),
             "event_type": "catalog_selection_prompt",
             "agent_name": "CatalogAgent",
             "latency_ms": latency,
@@ -151,18 +152,13 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
         matched_product = similar_skus[0]
         # Auto listing margin logic
         cost = matched_product.get("meesho_cost_inr", 350)
-        # Check if user mentioned custom selling price
-        suggested_selling_price = matched_product.get("suggested_selling_price_inr") or max(cost + 150, int(cost / 0.7))
-
-        # Simple extraction for custom price in text (e.g. "599")
-        words = user_input.split()
-        selling_price = suggested_selling_price
-        for w in words:
-            if w.isdigit():
-                val = int(w)
-                if val > cost:
-                    selling_price = val
-                    break
+        # A price named in the message ("599 me list karo") wins, as long as
+        # it is above cost - selling at or below cost is never drafted.
+        asked_price = requested_price(user_input)
+        if asked_price is not None and asked_price > cost:
+            selling_price = asked_price
+        else:
+            selling_price = matched_product.get("suggested_selling_price_inr") or suggested_price(cost)
 
         # Real product photo (not AI-generated) - falls back to a seeded placeholder
         # only if this SKU predates the base_image_url column being populated.
@@ -213,7 +209,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
             # (Python-sourced cost + margin, never invented), and asks
             # permission to post OR offers a price change in the same
             # message. "Yes"/a new price on the next turn is resolved by the
-            # existing check_pending_approval/_extract_price flow - no
+            # existing check_pending_approval/requested_price flow - no
             # separate state machine needed for this trigger.
             reply_text = (
                 f"Zaroor Didi! *{matched_product.get('name')}* ki cost price ₹{cost} hai. "
@@ -266,7 +262,7 @@ def run_catalog_agent(state: SakhiState) -> SakhiState:
     } 
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "catalog_draft",
         "agent_name": "CatalogAgent",
         "latency_ms": latency,

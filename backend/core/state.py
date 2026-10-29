@@ -1,15 +1,29 @@
 from typing import TypedDict, Optional, List, Dict, Any
 
-__all__ = ["SakhiState", "_pending_key"]
+__all__ = ["SakhiState", "_pending_key", "conversation_id", "new_turn_state"]
 
 
-def _pending_key(whatsapp_number: str, active_mode: str) -> str:
-    return f"{whatsapp_number}::{active_mode}"
+def _pending_key(session_id: str, active_mode: str) -> str:
+    return f"{session_id}::{active_mode}"
+
+
+def conversation_id(state: "SakhiState") -> str:
+    """Which conversation this turn belongs to - the key for every piece of
+    cross-turn state and for telemetry. It is the browser's session_id, not
+    the WhatsApp number: the demo signs everyone in as the same reseller, so
+    keying by number made every visitor share one conversation. The number
+    is only the fallback for code paths that never came through the API
+    (unit tests, scripts); /chat/send always supplies a session_id."""
+    return state.get("session_id") or state.get("whatsapp_number", "whatsapp:+919876543210")
 
 
 class SakhiState(TypedDict):
     reseller_id: str
     whatsapp_number: str
+    session_id: str
+    # The frontend's id for this one message, resent unchanged on a retry -
+    # the idempotency key for anything the turn writes (see save_order).
+    client_message_id: Optional[str]
     raw_input: str
     input_type: str
     active_mode: str  # 'reseller' or 'customer' - toggled from the frontend UI
@@ -88,3 +102,49 @@ class SakhiState(TypedDict):
 
     # DB models context
     context_data: Optional[Dict[str, Any]]
+
+
+def new_turn_state(
+    session_id: str, whatsapp_number: str, text: str, input_type: str = "text", active_mode: str = "reseller",
+    client_message_id: Optional[str] = None,
+) -> SakhiState:
+    """The state one /chat/send turn starts the graph with. Shared by the API
+    and the tests, so a test turn starts exactly like a real one."""
+    return {
+        "reseller_id": "",
+        "whatsapp_number": whatsapp_number,
+        "session_id": session_id,
+        "client_message_id": client_message_id,
+        "raw_input": text,
+        "input_type": input_type,
+        "active_mode": active_mode,
+        "reseller_name": "",
+        "reseller_location": "",
+        "reseller_language": "",
+        "reseller_dialect": "",
+        "detected_intent": "",
+        "intent_confidence": 0.0,
+        "pending_route": "",
+        "pending_return_route": "",
+        "pending_selection_route": "",
+        "context_lock_route": "",
+        "reply_text": "",
+        "reply_audio_b64": None,
+        "reply_image_url": None,
+        "reply_price": None,
+        "reply_product_options": None,
+        "reply_tts_text": None,
+        "listing_finalized": False,
+        "listing_broadcast_caption": None,
+        "listing_broadcast_caption_tts": None,
+        "listing_product_name": None,
+        "listing_category": None,
+        "reply_purchase_intent_detected": False,
+        "reply_order_id": None,
+        "reply_confirmed_product_name": None,
+        "reply_confirmed_product_price": None,
+        "reply_confirmed_product_is_unlisted": False,
+        "reply_handoff_triggered": False,
+        "trace_logs": [],
+        "context_data": None,
+    }

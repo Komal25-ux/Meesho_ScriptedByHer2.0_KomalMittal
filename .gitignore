@@ -20,3 +20,8 @@ ideas.txt
 importantinfo.txt
 demo_script.md
 presentation_blueprint.md
+# Launch film master (over GitHub's 100 MB limit); the web copy lives in .github/readme/
+Sakhi_Launch_Video.mp4
+backend/temp_uploads/
+.hypothesis/
+mutants/

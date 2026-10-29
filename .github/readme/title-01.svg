@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 136" width="1200" height="136" role="img" aria-labelledby="t01-t">
+  <title id="t01-t">01 Product: Live, not a recording.</title>
+  <defs>
+    <linearGradient id="t01-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B0A19"/><stop offset="1" stop-color="#11050F"/></linearGradient>
+    <radialGradient id="t01-glow" cx="10%" cy="0%" r="70%"><stop offset="0" stop-color="#9F2089" stop-opacity=".5"/><stop offset="1" stop-color="#4A1445" stop-opacity="0"/></radialGradient>
+    <filter id="t01-glowf" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <linearGradient id="t01-line" gradientUnits="userSpaceOnUse" x1="56" y1="0" x2="1144" y2="0"><stop offset="0" stop-color="#FC8B16"/><stop offset=".45" stop-color="#9F2089"/><stop offset="1" stop-color="#9F2089" stop-opacity="0"/></linearGradient>
+  </defs>
+  <style>
+    .t01-serif { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif; }
+    .t01-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .t01-sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .t01-draw { stroke-dasharray: 1200; stroke-dashoffset: 1200; animation: t01-draw 1.8s cubic-bezier(.65,0,.35,1) .3s forwards; }
+    @keyframes t01-draw { to { stroke-dashoffset: 0; } }
+    @media (prefers-reduced-motion: reduce) { .t01-draw { animation: none; stroke-dashoffset: 0; } }
+  </style>
+  <rect width="1200" height="136" rx="20" fill="url(#t01-bg)"/>
+  <rect width="1200" height="136" rx="20" fill="url(#t01-glow)"/>
+  <rect x=".5" y=".5" width="1199" height="135" rx="19.5" fill="none" stroke="#E27BD0" stroke-opacity=".2"/>
+  <rect x="10" y="10" width="1180" height="116" rx="13" fill="none" stroke="#F43397" stroke-opacity=".22" stroke-dasharray="5 6"/>
+  <text class="t01-mono" x="56" y="46" font-size="12" letter-spacing="3" fill="#E27BD0"><tspan fill="#FFBE76">01</tspan>   PRODUCT</text>
+  <text class="t01-mono" x="1144" y="46" text-anchor="end" font-size="10.5" letter-spacing="2.4" fill="#C2A9BC">THE LAUNCH FILM · 1:32</text>
+  <text class="t01-serif" x="54" y="94" font-size="40" font-weight="300" letter-spacing="-1" fill="#FCF2F9">Live, <tspan font-style="italic" fill="#F7C9EE">not a recording.</tspan></text>
+  <path class="t01-draw" d="M56 112 H1144" stroke="url(#t01-line)" stroke-width="1"/>
+</svg>

@@ -1,0 +1,16 @@
+# Direct dependencies only. requirements.txt is generated from this file and
+# pins every transitive package, so a rebuild months from now installs the
+# exact set the tests last passed against. To change a version, edit it here
+# and regenerate:
+#   uv pip compile requirements.in --python-version 3.13 -o requirements.txt
+fastapi==0.139.0
+uvicorn==0.51.0
+websockets==15.0.1  # uvicorn's WebSocket transport for /ws/agent-logs
+python-multipart==0.0.32
+httpx==0.28.1
+pydantic==2.13.4
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+langgraph==1.2.9
+google-genai==2.11.0
+supabase==2.31.0

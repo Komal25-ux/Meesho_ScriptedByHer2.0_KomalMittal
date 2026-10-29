@@ -1,21 +1,16 @@
-import re
-import json
 import logging
-from typing import Dict, Any, Optional, Literal
-from pydantic import BaseModel, ValidationError
+from typing import Dict, Any, Literal
+from pydantic import BaseModel
 from backend.core.gemini_utils import generate_with_fallback
+from backend.core.routing.keywords import mentions
+from backend.core.routing.llm_json import parse_verdict
+from backend.core.prompt_safety import USER_TEXT_RULE, quote_user_text
 from backend.core.constants import AFFIRMATIVE_KEYWORDS, NEGATIVE_KEYWORDS
+from backend.core.pricing import requested_price
 
 logger = logging.getLogger("sakhi-backend")
 
-__all__ = ["ApprovalIntent", "classify_approval_intent", "_extract_price"]
-
-
-def _extract_price(text: str) -> Optional[int]:
-    """Pulls the first standalone number out of a message, e.g. "price 599 kar
-    do" -> 599. Used to detect a price-change request during pending approval."""
-    match = re.search(r"\b(\d{2,6})\b", text)
-    return int(match.group(1)) if match else None
+__all__ = ["ApprovalIntent", "classify_approval_intent"]
 
 
 class ApprovalIntent(BaseModel):
@@ -33,7 +28,9 @@ def classify_approval_intent(user_input: str, pending: Dict[str, Any]) -> str:
 Product: {pending.get('matched_product_name')}
 Current Price: ₹{pending.get('selling_price')}
 
-The reseller just said: "{user_input}"
+The reseller just replied:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 Classify their response into EXACTLY ONE of these buckets:
 - "approve": they want to post/confirm the draft as-is (e.g. "haan kar do", "post kar do", "theek hai", "confirm").
@@ -42,26 +39,26 @@ Classify their response into EXACTLY ONE of these buckets:
 
 Output ONLY valid JSON: {{"intent": "approve" | "modify" | "new_request"}}"""
 
-    raw_text = generate_with_fallback(prompt)
-    if raw_text:
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
-            parsed = ApprovalIntent(**json.loads(cleaned))
-            return parsed.intent
-        except (json.JSONDecodeError, ValidationError, KeyError) as e:
-            logger.warning(f"Approval intent classification failed to parse ({e}); using keyword fallback.")
+    verdict = parse_verdict(generate_with_fallback(prompt), ApprovalIntent)
+    if verdict:
+        return verdict.intent
+    logger.warning("Approval intent: no usable LLM verdict; using keyword fallback.")
+    return _approval_fallback(user_input)
 
-    # Emergency fallback only - used if Gemini is entirely unreachable, so the
-    # human-in-the-loop flow doesn't hard-fail with no path forward.
-    lower = user_input.strip().lower()
-    if any(k in lower for k in AFFIRMATIVE_KEYWORDS) and not _extract_price(user_input):
-        return "approve"
-    if _extract_price(user_input):
+
+def _approval_fallback(user_input: str) -> str:
+    """Outage-only rules, first match wins:
+    1. a price is named           -> "modify" ("nahi, 599 kar do" is a price change)
+    2. any refusal word           -> "new_request" (an unclear yes/no never publishes)
+    3. an affirmative             -> "approve"
+    4. anything else              -> "new_request"
+    Refusal is checked before agreement: "kal confirm karungi, abhi ruko"
+    used to approve the draft because it contains "confirm".
+    """
+    if requested_price(user_input):
         return "modify"
-    if any(k in lower for k in NEGATIVE_KEYWORDS):
+    if mentions(user_input, NEGATIVE_KEYWORDS):
         return "new_request"
+    if mentions(user_input, AFFIRMATIVE_KEYWORDS):
+        return "approve"
     return "new_request"

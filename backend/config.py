@@ -1,10 +1,15 @@
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     PORT: int = 8000
     ENVIRONMENT: str = "development"
     FRONTEND_URL: str = "http://localhost:5173"
+    # Browser origins allowed to call the API and open the trace socket,
+    # comma-separated. FRONTEND_URL is always added to these.
+    CORS_ORIGINS: str = "http://localhost:5173,https://meesho-sakhi-komal25.vercel.app"
     WS_HEARTBEAT_INTERVAL: int = 30
     
     # Credentials (will load from environment, defaults to empty strings to avoid crashes)
@@ -23,9 +28,22 @@ class Settings(BaseSettings):
     
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""
+
+    # Where cross-turn conversation state lives (backend/core/session.py).
+    # Empty means: the session_state table whenever Supabase is configured,
+    # memory otherwise. Tests force "memory".
+    SESSION_STORE: str = ""
+    SESSION_TTL_HOURS: int = 24
+
+    # Abuse limits (backend/api/limits.py). Per instance, per minute.
+    RATE_LIMIT_IP_PER_MINUTE: int = 60
+    RATE_LIMIT_SESSION_PER_MINUTE: int = 20
+    # Whole request body. A minute-long voice note is well under 1 MB.
+    MAX_REQUEST_BYTES: int = 6_000_000
     
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    @property
+    def allowed_origins(self) -> list[str]:
+        origins = [o.strip().rstrip("/") for o in f"{self.CORS_ORIGINS},{self.FRONTEND_URL}".split(",")]
+        return sorted({o for o in origins if o})
 
 settings = Settings()

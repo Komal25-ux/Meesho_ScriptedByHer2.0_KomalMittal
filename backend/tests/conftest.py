@@ -1,139 +1,95 @@
-import os
-import pytest
-from unittest.mock import MagicMock
+"""Shared test setup.
 
-# Ensure required environment variables exist with mock defaults before any module imports
+Layout (see TESTING.md for the reasoning):
+  unit/        pure rules - pricing, parsing, matching, limits; no app objects
+  components/  one agent or graph node at a time, on the fakes in support/
+  journeys/    whole conversations through the compiled graph
+  adapters/    the edges: session store, database client, Gemini client, audio
+  api/         HTTP behaviour - contract, validation, limits, security
+"""
+import os
+import socket
+
+import pytest
+from hypothesis import HealthCheck, settings as hypothesis_settings
+
+# Settings are read at import time, so these must be set before any backend
+# module loads. The Supabase values are fake on purpose: the client is
+# created, every real call is blocked below, and tests swap in fakes.
 os.environ.setdefault("SUPABASE_URL", "https://mock.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_KEY", "mock-service-key")
 os.environ.setdefault("GEMINI_API_KEY", "mock-gemini-key")
 os.environ.setdefault("GEMINI_API_KEY_FALLBACK", "mock-gemini-fallback")
 os.environ.setdefault("GEMINI_API_KEY_FALLBACK_2", "mock-gemini-fallback-2")
+os.environ["SESSION_STORE"] = "memory"
 
-import socket
-
-@pytest.fixture(autouse=True)
-def block_network(monkeypatch):
-    """Guard against any real external network calls during test execution."""
-    def guarded_connect(self, *args, **kwargs):
-        raise RuntimeError(f"Network access disabled during unit tests: connect attempted with {args}")
-    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+# CI runs the property tests with a fixed seed so a failure always
+# reproduces; locally they explore new examples on every run.
+hypothesis_settings.register_profile("ci", derandomize=True, deadline=None, max_examples=200)
+hypothesis_settings.register_profile("dev", deadline=None, suppress_health_check=[HealthCheck.too_slow])
+hypothesis_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
 
 @pytest.fixture(autouse=True)
-def reset_session_stores():
-    """Clear in-memory session dictionaries before each test to prevent test leakage."""
+def no_network(monkeypatch):
+    """A test that reaches for the real Gemini, Sarvam or Supabase fails loudly."""
+    def refuse(self, *args, **kwargs):
+        raise RuntimeError(f"Network access attempted during a test: {args}")
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+
+@pytest.fixture(autouse=True)
+def fresh_session_state(monkeypatch):
+    """Every test starts with no conversation state at all."""
     from backend.core import session
-    session.PENDING_LISTINGS.clear()
-    session.PENDING_SELECTIONS.clear()
-    session.LAST_VIEWED_PRODUCT.clear()
-    session.FRESH_BROADCAST_LOCK.clear()
-    session.SHOWN_PRODUCT_IDS.clear()
-    session.LAST_REQUESTED_CATEGORY.clear()
-    session.PENDING_RETURNS.clear()
-    yield
-    session.PENDING_LISTINGS.clear()
-    session.PENDING_SELECTIONS.clear()
-    session.LAST_VIEWED_PRODUCT.clear()
-    session.FRESH_BROADCAST_LOCK.clear()
-    session.SHOWN_PRODUCT_IDS.clear()
-    session.LAST_REQUESTED_CATEGORY.clear()
-    session.PENDING_RETURNS.clear()
+    monkeypatch.setattr(session, "store", session.InMemorySessionStore())
+
+
+@pytest.fixture(autouse=True)
+def fresh_rate_limits():
+    from backend.api.limits import ip_limiter, session_limiter
+    ip_limiter.reset()
+    session_limiter.reset()
 
 
 @pytest.fixture
-def make_state():
-    """Factory fixture for a standard SakhiState dict."""
-    def _factory(**overrides):
-        base = {
-            "raw_input": "namaste",
-            "whatsapp_number": "whatsapp:+919876543210",
-            "active_mode": "reseller",
-            "reseller_id": "reseller-123",
-            "reseller_name": "Sunita Didi",
-            "reseller_location": "Kanpur",
-            "reseller_language": "hi",
-            "reseller_dialect": "hindi",
-            "detected_intent": "GENERAL",
-            "intent_confidence": 1.0,
-            "reply_text": "",
-            "reply_tts_text": "",
-            "reply_image_url": None,
-            "reply_price": None,
-            "reply_product_options": None,
-            "trace_logs": [],
-            "context_data": {},
-            "listing_finalized": False,
-            "listing_broadcast_caption": None,
-            "listing_broadcast_caption_tts": None,
-            "listing_product_name": None,
-            "listing_category": None,
-            "pending_route": None,
-            "pending_selection_route": None,
-            "context_lock_route": None,
-            "pending_return_route": None,
-        }
-        base.update(overrides)
-        return base
-    return _factory
+def sakhi(monkeypatch):
+    """The real graph and agents running on fakes: scripted Gemini, scripted
+    classifiers and an in-memory Supabase holding the test catalog."""
+    from backend.tests.support.catalog import CATALOG
+    from backend.tests.support.harness import install
+    return install(monkeypatch, CATALOG)
 
 
 @pytest.fixture
-def mock_db_orchestrator(monkeypatch):
-    """Provides standard mock implementations for db_client methods invoked by orchestrator nodes."""
-    from backend.db.supabase_client import db_client
-    from unittest.mock import MagicMock
+def voice(monkeypatch):
+    """Sarvam and ffmpeg replaced: speech-to-text hears `voice.heard`, and
+    every synthesized voice note is recorded."""
+    class Voice:
+        heard = "laal saree dikhao"
+        spoken = []
 
-    monkeypatch.setattr(db_client, "get_or_create_reseller", lambda phone: {
-        "id": "reseller-123",
-        "name": "Sunita Didi",
-        "location": "Kanpur",
-        "language": "hi",
-        "dialect": "hindi",
-    })
-    monkeypatch.setattr(db_client, "get_reseller_profile", lambda r_id: {
-        "id": r_id,
-        "commission_rate": 0.2,
-    })
-    monkeypatch.setattr(db_client, "save_conversation_turn", lambda payload: {"id": "turn-1"})
-    monkeypatch.setattr(db_client, "log_agent_event", lambda payload: {"id": "log-1"})
-    monkeypatch.setattr(db_client, "save_listing", lambda payload: {"id": "listing-1", **payload})
-    monkeypatch.setattr(db_client, "save_order", lambda payload: {"id": "order-1", **payload})
-    monkeypatch.setattr(db_client, "save_return", lambda payload: {"id": "return-1", **payload})
-    monkeypatch.setattr(db_client, "is_product_listed", lambda r_id, p_id: True)
-    monkeypatch.setattr(db_client, "get_listing_id", lambda r_id, p_id: "listing-1")
-    monkeypatch.setattr(db_client, "get_conversation_history", lambda r_id, limit=10: [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello"}
-    ])
-    return db_client
+        async def synthesize(self, text):
+            self.spoken.append(text)
+            return f"audio:{text}".encode()
+
+        async def to_wav(self, path):
+            return path + ".wav"
+
+        async def transcribe(self, path):
+            return self.heard
+
+    fake = Voice()
+    fake.spoken = []
+    monkeypatch.setattr("backend.api.chat_router.synthesize_speech", fake.synthesize)
+    monkeypatch.setattr("backend.api.chat_router.convert_to_wav", fake.to_wav)
+    monkeypatch.setattr("backend.api.chat_router.transcribe_audio", fake.transcribe)
+    return fake
 
 
 @pytest.fixture
-def mock_vaani(monkeypatch):
-    """Mocks speech synthesis and transcription to avoid external network calls."""
-    async def _mock_synth(text):
-        return b"mock-tts-bytes"
-
-    async def _mock_wav(path):
-        return path + ".wav"
-
-    async def _mock_transcribe(path):
-        return "transcribed audio text"
-
-    monkeypatch.setattr("backend.core.vaani_audio.synthesize_speech", _mock_synth)
-    monkeypatch.setattr("backend.core.vaani_audio.convert_to_wav", _mock_wav)
-    monkeypatch.setattr("backend.core.vaani_audio.transcribe_audio", _mock_transcribe)
-    monkeypatch.setattr("backend.api.chat_router.synthesize_speech", _mock_synth)
-    monkeypatch.setattr("backend.api.chat_router.convert_to_wav", _mock_wav)
-    monkeypatch.setattr("backend.api.chat_router.transcribe_audio", _mock_transcribe)
-
-
-@pytest.fixture
-def api_client(mock_db_orchestrator, mock_vaani):
-    """TestClient instance configured with mocked database and voice pipelines."""
+def api_client(sakhi, voice):
+    """The FastAPI app over the fakes, called through HTTP."""
     from fastapi.testclient import TestClient
     from backend.main import app
     return TestClient(app)
-
-
-

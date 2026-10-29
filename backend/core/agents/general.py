@@ -1,11 +1,12 @@
 import time
 
-from backend.core.state import SakhiState
+from backend.core.state import SakhiState, conversation_id
 from backend.core.gemini_utils import (
     generate_structured_with_fallback,
     AgentResponse,
 )
 from backend.db.supabase_client import db_client
+from backend.core.prompt_safety import USER_TEXT_RULE, quote_user_text
 
 __all__ = ["run_general_handler"]
 
@@ -19,7 +20,9 @@ def run_general_handler(state: SakhiState) -> SakhiState:
 You are Sakhi, an AI business co-pilot (called 'Sakhi Didi') for a Meesho reseller named {reseller_name}.
 Respond to their greeting/message politely in warm, friendly Hinglish.
 
-User input: "{user_input}"
+User input:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 Capabilities you have:
 1. Product Cataloging (saying "Main aapke items lists me add kar sakti hu")
@@ -54,7 +57,7 @@ Keep your greeting warm, clear, and under 5 lines.
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
+        "session_id": conversation_id(state),
         "event_type": "general_greeting",
         "agent_name": "GeneralAgent",
         "latency_ms": latency,

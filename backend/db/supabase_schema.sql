@@ -199,20 +199,20 @@ ALTER TABLE product_embeddings ENABLE ROW LEVEL SECURITY;
 -- backend/db/supabase_client.py's actual query patterns need but don't get
 -- for free. Idempotent/safe to re-run.
 
--- get_active_listings/is_product_listed/get_listing_id all filter
+-- get_listing filters
 -- listings by (reseller_id, is_active) together - a composite index matches
 -- that WHERE shape directly (and still serves reseller_id-only lookups via
 -- the leftmost-prefix rule).
 CREATE INDEX IF NOT EXISTS idx_listings_reseller_active
   ON listings(reseller_id, is_active);
 
--- get_weekly_analytics filters orders by reseller_id alone.
+-- A reseller's orders are looked up by reseller_id (sales reporting).
 CREATE INDEX IF NOT EXISTS idx_orders_reseller_id
   ON orders(reseller_id);
 
--- get_conversation_history filters by reseller_id AND sorts by created_at
--- DESC with a LIMIT - the composite index matches both the filter and the
--- sort, avoiding a separate sort step after the scan.
+-- Reading a reseller's recent turns (newest first, with a LIMIT) filters by
+-- reseller_id AND sorts by created_at DESC - the composite index matches both
+-- the filter and the sort. The app itself only writes this table today.
 CREATE INDEX IF NOT EXISTS idx_conversations_reseller_created
   ON conversations(reseller_id, created_at DESC);
 
@@ -224,3 +224,98 @@ CREATE INDEX IF NOT EXISTS idx_conversations_reseller_created
 -- even on a small/empty table and stays effective as the catalog grows.
 CREATE INDEX IF NOT EXISTS idx_product_embeddings_embedding_hnsw
   ON product_embeddings USING hnsw (embedding vector_cosine_ops);
+
+-- 13. Conversation State Between Turns
+-- Each /chat/send call runs the agent graph from scratch, so whatever the next
+-- turn must know (a draft awaiting approval, a return in progress, the product
+-- under discussion) is stored here - see backend/core/session.py. One row per
+-- (conversation, slot); session_key is "<browser session uuid>::<mode>".
+-- Keeping it in Postgres instead of process memory means it survives restarts
+-- and redeploys and is shared by every backend instance.
+CREATE TABLE IF NOT EXISTS session_state (
+    session_key TEXT NOT NULL,
+    slot VARCHAR(50) NOT NULL,                     -- pending_listings | pending_returns | ...
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,               -- reads ignore expired rows
+    PRIMARY KEY (session_key, slot)
+);
+
+-- Lets expired rows be swept cheaply, e.g. from a scheduled job:
+--   DELETE FROM session_state WHERE expires_at < NOW();
+CREATE INDEX IF NOT EXISTS idx_session_state_expires_at
+  ON session_state(expires_at);
+
+-- Same reasoning as section 11: only the service-role backend touches it.
+ALTER TABLE session_state ENABLE ROW LEVEL SECURITY;
+
+-- 14. Filtered Vector Similarity Search (RPC)
+-- Same search as match_products, plus the category and "already shown" filters
+-- that category-strict pagination needs ("aur saree dikhao"), applied here so
+-- the database returns exactly match_count matching rows. Before this existed
+-- the backend over-fetched 100 rows and filtered them in Python.
+CREATE OR REPLACE FUNCTION match_products_filtered (
+  query_embedding VECTOR(768),
+  match_threshold FLOAT,
+  match_count INT,
+  category_filter VARCHAR(100) DEFAULT NULL,
+  exclude_ids VARCHAR(50)[] DEFAULT '{}'
+)
+RETURNS TABLE (
+  product_id VARCHAR(50),
+  name TEXT,
+  category VARCHAR(100),
+  suggested_selling_price_inr INTEGER,
+  meesho_cost_inr INTEGER,
+  return_window_days INTEGER,
+  cod_available BOOLEAN,
+  description TEXT,
+  sizes TEXT[],
+  colors TEXT[],
+  material VARCHAR(100),
+  base_image_url TEXT,
+  similarity FLOAT
+)
+LANGUAGE sql STABLE
+AS $$
+  SELECT
+    p.product_id,
+    p.name,
+    p.category,
+    p.suggested_selling_price_inr,
+    p.meesho_cost_inr,
+    p.return_window_days,
+    p.cod_available,
+    p.description,
+    p.sizes,
+    p.colors,
+    p.material,
+    p.base_image_url,
+    1 - (p.embedding <=> query_embedding) AS similarity
+  FROM product_embeddings p
+  WHERE (category_filter IS NULL OR p.category = category_filter)
+    AND NOT (p.product_id = ANY (exclude_ids))
+    AND 1 - (p.embedding <=> query_embedding) > match_threshold
+  ORDER BY p.embedding <=> query_embedding
+  LIMIT match_count;
+$$;
+
+-- Lets the planner narrow to one category before ranking by distance. At a
+-- much larger catalog, an HNSW scan with a WHERE clause can return fewer than
+-- match_count rows (it only looks at ef_search candidates, then filters);
+-- pgvector 0.8+ fixes that with SET hnsw.iterative_scan = relaxed_order.
+CREATE INDEX IF NOT EXISTS idx_product_embeddings_category
+  ON product_embeddings(category);
+
+-- 15. Duplicate-Order Protection
+-- client_message_id is the frontend's id for one chat message, resent
+-- unchanged when the request is retried; unique, so a replay can never insert
+-- a second order (backend save_order upserts with ignore-duplicates on it).
+-- session_id lets a re-typed confirmation of the same product be matched to
+-- the order already placed a few minutes earlier (find_recent_order).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_message_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS orders_client_message_id_key
+  ON orders(client_message_id);
+CREATE INDEX IF NOT EXISTS idx_orders_session_product_recent
+  ON orders(session_id, product_id, ordered_at DESC);

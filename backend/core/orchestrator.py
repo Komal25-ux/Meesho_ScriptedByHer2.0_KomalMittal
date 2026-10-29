@@ -8,14 +8,16 @@ from backend.core.gemini_utils import (
     ReturnsAgentResponse,
     IntentRouter,
 )
-from backend.core.state import SakhiState, _pending_key
+from backend.core.state import SakhiState, _pending_key, conversation_id
 from backend.core.constants import (
     CATALOG_SHARE_TRIGGER_RE,
     CUSTOMER_DETAILS_TRIGGER_RE,
     _RETURNS_STAGE_LABELS,
     _RETURNS_FALLBACK_TEXT,
 )
-from backend.core.routing.approval import classify_approval_intent, _extract_price
+from backend.core.routing.approval import classify_approval_intent
+from backend.core.pricing import requested_price
+from backend.core.prompt_safety import USER_TEXT_RULE, keep_if_prices_grounded, quote_user_text
 from backend.core.routing.returns import classify_return_grievance
 from backend.core.routing.exchange import classify_exchange_confirmation
 from backend.core.routing.triggers import _strip_trigger_prefix
@@ -60,7 +62,9 @@ retain the sale wherever genuinely possible - through an exchange - while never 
 who truly wants a refund.
 
 CURRENT STAGE FOR THIS TURN: {stage_label}
-CUSTOMER JUST SAID: "{user_input}"
+CUSTOMER JUST SAID:
+{user_input}
+{user_text_rule}
 {alternative_context}
 
 Only follow the ONE scenario matching CURRENT STAGE above - ignore the others this turn.
@@ -133,7 +137,7 @@ def load_memory(state: SakhiState) -> SakhiState:
     }
     state["trace_logs"] = [log_event]
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "memory_retrieval",
         "agent_name": "Orchestrator",
         "latency_ms": latency,
@@ -152,12 +156,11 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
     matching, since phrases like "kar do"/"kardo" show up identically in a
     genuine approval, a price edit, and an unrelated new listing request."""
     t_start = time.time()
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
     reseller_name = state.get("reseller_name", "Sunita Didi")
     raw_input = state.get("raw_input", "")
 
-    pending_key = _pending_key(whatsapp_number, active_mode)
+    pending_key = _pending_key(conversation_id(state), active_mode)
     pending = PENDING_LISTINGS.get(pending_key)
     if not pending:
         state["pending_route"] = "not_pending"
@@ -169,7 +172,7 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
     if intent == "approve":
         state["pending_route"] = "finalize"
     elif intent == "modify":
-        new_price = _extract_price(raw_input)
+        new_price = requested_price(raw_input)
         if new_price and new_price > pending["cost"]:
             new_caption = generate_whatsapp_caption(
                 reseller_name, pending["matched_product_name"], pending.get("matched_product_description", ""), new_price
@@ -226,7 +229,7 @@ def check_pending_approval(state: SakhiState) -> SakhiState:
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "pending_approval_check",
         "agent_name": "Orchestrator",
         "latency_ms": latency,
@@ -249,11 +252,10 @@ def check_pending_selection(state: SakhiState) -> SakhiState:
     PENDING_SELECTIONS - the actual product match is then re-resolved by that
     agent's own exact-name lookup (db_client.get_product_by_name), not here."""
     t_start = time.time()
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
     raw_input = state.get("raw_input", "")
 
-    pending_key = _pending_key(whatsapp_number, active_mode)
+    pending_key = _pending_key(conversation_id(state), active_mode)
     pending = PENDING_SELECTIONS.get(pending_key)
     if not pending:
         state["pending_selection_route"] = "not_pending"
@@ -290,7 +292,7 @@ def check_pending_selection(state: SakhiState) -> SakhiState:
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "pending_selection_check",
         "agent_name": "Orchestrator",
         "latency_ms": latency,
@@ -317,11 +319,10 @@ def check_fresh_context_lock(state: SakhiState) -> SakhiState:
     actually turns out to show buying interest - so only the very next
     message ever gets this treatment, exactly as required."""
     t_start = time.time()
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
     raw_input = state.get("raw_input", "")
 
-    session_key = _pending_key(whatsapp_number, active_mode)
+    session_key = _pending_key(conversation_id(state), active_mode)
     locked = active_mode == "customer" and FRESH_BROADCAST_LOCK.pop(session_key, False)
     locked_product = LAST_VIEWED_PRODUCT.get(session_key) if locked else None
 
@@ -338,7 +339,9 @@ right after seeing it.
 PRODUCT JUST SHARED (the ONLY product relevant to this turn - never consider or search for any other item):
 {product_line}
 
-CUSTOMER'S MESSAGE: "{raw_input}"
+CUSTOMER'S MESSAGE:
+{quote_user_text(raw_input)}
+{USER_TEXT_RULE}
 
 This message shows buying interest in / a request for details about the product just shared. Respond by:
 1. Warmly confirming/describing the item, grounded ONLY in the product above.
@@ -359,7 +362,11 @@ confirm on their NEXT message, that is handled separately.
 You must output your response using the provided JSON schema: ui_text, tts_text, answered_from_product_context,
 return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
 """
-    result = generate_structured_with_fallback(lock_prompt, CustomerAgentResponse)
+    result = keep_if_prices_grounded(
+        generate_structured_with_fallback(lock_prompt, CustomerAgentResponse),
+        [locked_product.get("suggested_selling_price_inr")],
+        where="Latest Context Lock",
+    )
 
     fallback_ui = (
         f"Ji, *{locked_product.get('name')}* abhi hi post hua hai - price ₹{locked_product.get('suggested_selling_price_inr')} hai. "
@@ -390,7 +397,7 @@ return_retention_triggered, purchase_intent_detected, grounded_via_recent_item.
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "fresh_context_lock",
         "agent_name": "CustomerAgent",
         "latency_ms": latency,
@@ -412,12 +419,11 @@ def check_pending_return(state: SakhiState) -> SakhiState:
     LangGraph thread memory, so this dict is the only way to know "this
     customer is mid-return" by the time their next message arrives."""
     t_start = time.time()
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
     reseller_name = state.get("reseller_name", "Sunita Didi")
     raw_input = state.get("raw_input", "")
 
-    pending_key = _pending_key(whatsapp_number, active_mode)
+    pending_key = _pending_key(conversation_id(state), active_mode)
     pending = PENDING_RETURNS.get(pending_key)
     if not pending:
         state["pending_return_route"] = "not_pending"
@@ -486,10 +492,18 @@ def check_pending_return(state: SakhiState) -> SakhiState:
         product_name=pending.get("product_name", ""),
         order_id=pending.get("order_id", ""),
         stage_label=_RETURNS_STAGE_LABELS[stage_label],
-        user_input=raw_input,
+        user_input=quote_user_text(raw_input),
+        user_text_rule=USER_TEXT_RULE,
         alternative_context=alternative_context,
     )
-    result = generate_structured_with_fallback(retention_prompt, ReturnsAgentResponse)
+    result = keep_if_prices_grounded(
+        generate_structured_with_fallback(retention_prompt, ReturnsAgentResponse),
+        [
+            (pending.get("proposed_alternative") or {}).get("suggested_selling_price_inr"),
+            (original_product or {}).get("suggested_selling_price_inr"),
+        ],
+        where="Returns funnel",
+    )
 
     fallback_ui, fallback_tts = _RETURNS_FALLBACK_TEXT.get(stage_label, (
         f"Ji, humne {pending.get('product_name', 'is item')} ke liye ek alternative dhoondha hai - kya yeh chalega?",
@@ -543,7 +557,7 @@ def check_pending_return(state: SakhiState) -> SakhiState:
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "returns_retention",
         "agent_name": "ReturnsAgent",
         "latency_ms": latency,
@@ -598,14 +612,18 @@ goal. Only CUSTOMER and GENERAL are ever valid choices when talking to a custome
 customer can never trigger CATALOG (listing/pricing is reseller-only) or GROWTH (business metrics are
 reseller-only); if the message's goal would otherwise map to one of those, route to GENERAL instead.
 
-Customer's message: "{user_input}"
+Customer's message:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 """
         else:
             prompt = f"""You are the Orchestrator for Sakhi, an AI business manager for a Hindi-speaking Meesho reseller.
 
 Evaluate the reseller's message below and select the route that matches their underlying semantic goal.
 
-Reseller's message: "{user_input}"
+Reseller's message:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 """
         result = generate_structured_with_fallback(prompt, IntentRouter)
         if result:
@@ -643,7 +661,7 @@ Reseller's message: "{user_input}"
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": state.get("whatsapp_number", "whatsapp:+919876543210"),
+        "session_id": conversation_id(state),
         "event_type": "intent_detection",
         "agent_name": "Orchestrator",
         "latency_ms": latency,
@@ -664,9 +682,11 @@ def route_decision(state: SakhiState) -> str:
 # ── NODE 3.5: FINALIZE CATALOG LISTING (post-approval) ────────
 def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     t_start = time.time()
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     active_mode = state.get("active_mode", "reseller")
-    pending = PENDING_LISTINGS.pop(_pending_key(whatsapp_number, active_mode), None)
+    pending_key = _pending_key(conversation_id(state), active_mode)
+    # Read, not popped: the draft is only cleared once the listing is saved,
+    # so if the save fails the reseller can simply approve it again.
+    pending = PENDING_LISTINGS.get(pending_key)
 
     if not pending:
         state["reply_text"] = "Maaf kijiyega Didi, mujhe pichla draft nahi mil raha. Kripya item dobara bataiye."
@@ -690,6 +710,7 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     listing_payload["image_url"] = base_image_url
 
     db_client.save_listing(listing_payload)
+    PENDING_LISTINGS.pop(pending_key, None)
 
     reply_text = (
         f"Ho gaya Didi! *{pending['matched_product_name']}* ₹{pending['selling_price']} me "
@@ -729,7 +750,7 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     # reseller negotiated a custom price before approving.
     matched_product = pending.get("matched_product")
     if matched_product:
-        customer_session_key = _pending_key(whatsapp_number, "customer")
+        customer_session_key = _pending_key(conversation_id(state), "customer")
         LAST_VIEWED_PRODUCT[customer_session_key] = {
             **matched_product,
             "suggested_selling_price_inr": pending["selling_price"],
@@ -752,7 +773,7 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
     }
     state["trace_logs"].append(log_event)
     db_client.log_agent_event({
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "event_type": "catalog_listing_finalized",
         "agent_name": "CatalogAgent",
         "latency_ms": latency,
@@ -781,12 +802,11 @@ def finalize_catalog_listing(state: SakhiState) -> SakhiState:
 # ── NODE 8: ASSEMBLE & SAVE ───────────────────────────────────
 def assemble_final_reply(state: SakhiState) -> SakhiState:
     t_start = time.time()
-    whatsapp_number = state.get("whatsapp_number", "whatsapp:+919876543210")
     
     # Save conversation turns to database for history
     db_client.save_conversation_turn({
         "reseller_id": state.get("reseller_id"),
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "role": "user",
         "content": state.get("raw_input", ""),
         "agent_used": "User"
@@ -794,7 +814,7 @@ def assemble_final_reply(state: SakhiState) -> SakhiState:
     
     db_client.save_conversation_turn({
         "reseller_id": state.get("reseller_id"),
-        "session_id": whatsapp_number,
+        "session_id": conversation_id(state),
         "role": "assistant",
         "content": state.get("reply_text", ""),
         "agent_used": state.get("detected_intent", "GENERAL")
@@ -808,7 +828,7 @@ def assemble_final_reply(state: SakhiState) -> SakhiState:
         "latency_ms": latency,
         "data": {
             "conversations_archived": True,
-            "session_id": whatsapp_number
+            "session_id": conversation_id(state)
         }
     }
     state["trace_logs"].append(log_event)

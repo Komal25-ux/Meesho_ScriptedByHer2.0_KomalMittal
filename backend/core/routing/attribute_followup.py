@@ -1,8 +1,16 @@
-import json
 import logging
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from backend.core.gemini_utils import generate_with_fallback
+from backend.core.routing.keywords import mentions
+from backend.core.routing.llm_json import parse_verdict
+from backend.core.prompt_safety import USER_TEXT_RULE, quote_user_text
+
+_COMPLAINT_WORDS = ["chota", "chhota", "bada", "tight", "loose", "kharab", "phat*", "pasand nahi", "achha nahi"]
+_ATTRIBUTE_WORDS = [
+    "size*", "colour*", "color*", "rang", "material", "fabric", "kapda", "price", "kimat", "keemat",
+    "kitne ka", "kitne ki", "available", "stock",
+]
 
 logger = logging.getLogger("sakhi-backend")
 
@@ -28,7 +36,9 @@ def classify_attribute_followup(user_input: str, product_name: str) -> bool:
     entirely."""
     prompt = f"""A customer was just discussing this product: "{product_name}"
 
-Their next message was: "{user_input}"
+Their next message was:
+{quote_user_text(user_input)}
+{USER_TEXT_RULE}
 
 Is this message a QUESTION asking about an ATTRIBUTE of THIS SAME product - size, color, material,
 fabric, price, availability, or return/exchange policy (e.g. "size kya hai", "colors kya hain", "kitne ka
@@ -41,28 +51,16 @@ dissatisfaction about size/fit/color/quality (e.g. "size chota hai", "color pasa
 returns, not inquiries), a greeting, or anything unrelated to this specific product's attributes.
 
 Output ONLY valid JSON: {{"is_followup": true|false}}"""
-    raw_text = generate_with_fallback(prompt)
-    if raw_text:
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
-            parsed = AttributeFollowupIntent(**json.loads(cleaned))
-            return parsed.is_followup
-        except (json.JSONDecodeError, ValidationError, KeyError) as e:
-            logger.warning(f"Attribute follow-up classification failed to parse ({e}); using keyword fallback.")
+    verdict = parse_verdict(generate_with_fallback(prompt), AttributeFollowupIntent)
+    if verdict:
+        return verdict.is_followup
+    logger.warning("Attribute follow-up: no usable LLM verdict; using keyword fallback.")
 
-    # Emergency fallback only - used if Gemini is entirely unreachable.
-    # Deliberately excludes "return"/"exchange" here: a keyword-only check
-    # can't reliably tell "return ho sakta hai kya" (an inquiry) apart from
-    # "return karna hai" (a genuine return request that Priority 1 must still
-    # catch), so during a total outage this stays conservative and lets those
-    # fall through to the normal flow instead of risking a swallowed return.
-    lower = user_input.strip().lower()
-    complaint_words = ["chota", "bada", "tight", "loose", "kharab", "phata", "pasand nahi", "achha nahi"]
-    if any(w in lower for w in complaint_words):
+    # Outage-only. Deliberately excludes "return"/"exchange": a keyword check
+    # can't tell "return ho sakta hai kya" (an inquiry) from "return karna
+    # hai" (a real return, which Priority 1 must still catch), so it stays
+    # conservative and lets both fall through to the normal flow. A complaint
+    # word vetoes everything: "size chota hai" is a return, not a question.
+    if mentions(user_input, _COMPLAINT_WORDS):
         return False
-    attribute_words = ["size", "colour", "color", "rang", "material", "fabric", "kapda", "price", "kimat", "kitne ka", "available", "stock"]
-    return any(w in lower for w in attribute_words)
+    return mentions(user_input, _ATTRIBUTE_WORDS)

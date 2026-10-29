@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="ag-t ag-d">
+  <title id="ag-t">Sakhi's four specialist agents</title>
+  <desc id="ag-d">Catalog agent drafts WhatsApp-ready listings with the real margin and waits for approval. Customer agent answers buyers with RAG over the pgvector catalog; photos come from code and every stated price is checked against the catalog. Growth agent reports revenue, profit, top seller and top category for any number of days, computed in Python. Returns funnel offers an exchange first and starts from a buyer's complaint in chat or from a system event.</desc>
+  <defs>
+    <linearGradient id="ag-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B0A19"/><stop offset="1" stop-color="#11050F"/></linearGradient>
+    <radialGradient id="ag-glow" cx="10%" cy="100%" r="70%"><stop offset="0" stop-color="#9F2089" stop-opacity=".4"/><stop offset="1" stop-color="#4A1445" stop-opacity="0"/></radialGradient>
+    <filter id="ag-glowf" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <style>
+    .ag-serif { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif; }
+    .ag-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .ag-sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .ag-in { animation: ag-in 1s cubic-bezier(.16,1,.3,1) both; }
+    @keyframes ag-in { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { .ag-in { animation: none; } }
+  </style>
+  <rect width="1200" height="400" rx="20" fill="url(#ag-bg)"/>
+  <rect width="1200" height="400" rx="20" fill="url(#ag-glow)"/>
+  <rect x=".5" y=".5" width="1199" height="399" rx="19.5" fill="none" stroke="#E27BD0" stroke-opacity=".2"/>
+  <rect x="10" y="10" width="1180" height="380" rx="13" fill="none" stroke="#F43397" stroke-opacity=".22" stroke-dasharray="5 6"/>
+  <g class="ag-in" style="animation-delay:0.15s"><g transform="translate(40 40)">
+    <rect width="265" height="320" rx="16" fill="#1B0A19" stroke="#E27BD0" stroke-opacity=".28"/>
+    <rect x="8" y="8" width="249" height="304" rx="11" fill="none" stroke="#F43397" stroke-opacity=".18" stroke-dasharray="4 5"/>
+    <g transform="translate(24 28)">
+      <rect width="52" height="52" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".5"/>
+      <rect width="52" height="52" rx="14" fill="none" stroke="#FFBE76" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;1;0" dur="6s" begin="1.0s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(26 26)" fill="none" stroke="#F7C9EE" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M-11 -6 L0 -11 L11 -6 L11 7 L0 12 L-11 7 Z"/><path d="M-11 -6 L0 -1 L11 -6 M0 -1 V12" stroke-opacity=".8"/></g>
+    </g>
+    <text class="ag-mono" x="241" y="48" font-size="10" letter-spacing="1.6" text-anchor="end" fill="#C2A9BC">01</text>
+    <text class="ag-serif" x="24" y="126" font-size="27" font-weight="300" fill="#FCF2F9">Catalog agent</text>
+    <text class="ag-sans" x="24" y="152" font-size="13.5" fill="#FFBE76">Lists a product in her words</text>
+    <line x1="24" y1="170" x2="241" y2="170" stroke="#E27BD0" stroke-opacity=".18"/>
+    <text class="ag-sans" x="24" y="196" font-size="14" fill="#C2A9BC">Drafts a WhatsApp-ready listing</text><text class="ag-sans" x="24" y="222" font-size="14" fill="#C2A9BC">with her real margin spelled</text><text class="ag-sans" x="24" y="248" font-size="14" fill="#C2A9BC">out, then waits for her yes.</text>
+    <text class="ag-mono" x="24" y="290" font-size="9.5" letter-spacing="1.6" fill="#42BC9E">● HUMAN APPROVAL GATE</text>
+  </g></g>
+  <g class="ag-in" style="animation-delay:0.30s"><g transform="translate(325 40)">
+    <rect width="265" height="320" rx="16" fill="#1B0A19" stroke="#E27BD0" stroke-opacity=".28"/>
+    <rect x="8" y="8" width="249" height="304" rx="11" fill="none" stroke="#F43397" stroke-opacity=".18" stroke-dasharray="4 5"/>
+    <g transform="translate(24 28)">
+      <rect width="52" height="52" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".5"/>
+      <rect width="52" height="52" rx="14" fill="none" stroke="#FFBE76" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;1;0" dur="6s" begin="2.5s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(26 26)" fill="none" stroke="#F7C9EE" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M-12 -9 H12 V5 H-2 L-8 11 V5 H-12 Z"/><path d="M-6 -2 H6" stroke-opacity=".8"/></g>
+    </g>
+    <text class="ag-mono" x="241" y="48" font-size="10" letter-spacing="1.6" text-anchor="end" fill="#C2A9BC">02</text>
+    <text class="ag-serif" x="24" y="126" font-size="27" font-weight="300" fill="#FCF2F9">Customer agent</text>
+    <text class="ag-sans" x="24" y="152" font-size="13.5" fill="#FFBE76">Answers buyers from the catalog</text>
+    <line x1="24" y1="170" x2="241" y2="170" stroke="#E27BD0" stroke-opacity=".18"/>
+    <text class="ag-sans" x="24" y="196" font-size="14" fill="#C2A9BC">RAG over the pgvector catalog.</text><text class="ag-sans" x="24" y="222" font-size="14" fill="#C2A9BC">Photos come from code; prices</text><text class="ag-sans" x="24" y="248" font-size="14" fill="#C2A9BC">are checked before she replies.</text>
+    <text class="ag-mono" x="24" y="290" font-size="9.5" letter-spacing="1.6" fill="#42BC9E">● GROUNDED IN THE CATALOG</text>
+  </g></g>
+  <g class="ag-in" style="animation-delay:0.45s"><g transform="translate(610 40)">
+    <rect width="265" height="320" rx="16" fill="#1B0A19" stroke="#E27BD0" stroke-opacity=".28"/>
+    <rect x="8" y="8" width="249" height="304" rx="11" fill="none" stroke="#F43397" stroke-opacity=".18" stroke-dasharray="4 5"/>
+    <g transform="translate(24 28)">
+      <rect width="52" height="52" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".5"/>
+      <rect width="52" height="52" rx="14" fill="none" stroke="#FFBE76" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;1;0" dur="6s" begin="4.0s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(26 26)" fill="none" stroke="#F7C9EE" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M-12 10 H12"/><path d="M-9 4 L-3 -2 L2 2 L10 -8"/><path d="M5 -8 H10 V-3"/></g>
+    </g>
+    <text class="ag-mono" x="241" y="48" font-size="10" letter-spacing="1.6" text-anchor="end" fill="#C2A9BC">03</text>
+    <text class="ag-serif" x="24" y="126" font-size="27" font-weight="300" fill="#FCF2F9">Growth agent</text>
+    <text class="ag-sans" x="24" y="152" font-size="13.5" fill="#FFBE76">Coaches her on what sells</text>
+    <line x1="24" y1="170" x2="241" y2="170" stroke="#E27BD0" stroke-opacity=".18"/>
+    <text class="ag-sans" x="24" y="196" font-size="14" fill="#C2A9BC">Revenue, profit, top seller and</text><text class="ag-sans" x="24" y="222" font-size="14" fill="#C2A9BC">top category for any N days.</text><text class="ag-sans" x="24" y="248" font-size="14" fill="#C2A9BC">Numbers computed in Python.</text>
+    <text class="ag-mono" x="24" y="290" font-size="9.5" letter-spacing="1.6" fill="#42BC9E">● SALES-DATA GROUNDED</text>
+  </g></g>
+  <g class="ag-in" style="animation-delay:0.60s"><g transform="translate(895 40)">
+    <rect width="265" height="320" rx="16" fill="#1B0A19" stroke="#E27BD0" stroke-opacity=".28"/>
+    <rect x="8" y="8" width="249" height="304" rx="11" fill="none" stroke="#F43397" stroke-opacity=".18" stroke-dasharray="4 5"/>
+    <g transform="translate(24 28)">
+      <rect width="52" height="52" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".5"/>
+      <rect width="52" height="52" rx="14" fill="none" stroke="#FFBE76" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;1;0" dur="6s" begin="5.5s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(26 26)" fill="none" stroke="#F7C9EE" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 -3 A10 10 0 1 1 -6 7"/><path d="M-13 -9 L-9 -3 L-3 -6"/></g>
+    </g>
+    <text class="ag-mono" x="241" y="48" font-size="10" letter-spacing="1.6" text-anchor="end" fill="#C2A9BC">04</text>
+    <text class="ag-serif" x="24" y="126" font-size="27" font-weight="300" fill="#FCF2F9">Returns funnel</text>
+    <text class="ag-sans" x="24" y="152" font-size="13.5" fill="#FFBE76">Turns a return into a sale</text>
+    <line x1="24" y1="170" x2="241" y2="170" stroke="#E27BD0" stroke-opacity=".18"/>
+    <text class="ag-sans" x="24" y="196" font-size="14" fill="#C2A9BC">Hears the grievance, offers an</text><text class="ag-sans" x="24" y="222" font-size="14" fill="#C2A9BC">exchange first. Starts from a</text><text class="ag-sans" x="24" y="248" font-size="14" fill="#C2A9BC">complaint or a system event.</text>
+    <text class="ag-mono" x="24" y="290" font-size="9.5" letter-spacing="1.6" fill="#42BC9E">● EXCHANGE BEFORE REFUND</text>
+  </g></g>
+</svg>

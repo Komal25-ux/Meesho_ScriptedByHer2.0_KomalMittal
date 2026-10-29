@@ -1,10 +1,11 @@
 import os
 import re
-import subprocess
+import asyncio
 import logging
 import httpx
 from typing import Optional
 from backend.config import settings
+from google.genai import types
 from backend.core.gemini_utils import generate_with_fallback
 
 logger = logging.getLogger("sakhi-backend")
@@ -102,13 +103,18 @@ async def convert_to_wav(input_file_path: str) -> str:
             output_file_path
         ]
         logger.info(f"Running FFmpeg: {' '.join(cmd)}")
-        # Run process synchronously
-        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        # Awaited as a child process, so the event loop keeps serving other
+        # requests while ffmpeg runs.
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            message = stderr.decode("utf-8", errors="ignore")
+            logger.error(f"FFmpeg process error: {message}")
+            raise RuntimeError(f"ffmpeg exited with code {process.returncode}")
         logger.info("Audio conversion completed successfully.")
         return output_file_path
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg process error: {e.stderr.decode('utf-8', errors='ignore')}")
-        raise e
     except Exception as e:
         logger.error(f"Failed to transcode audio: {e}")
         raise e
@@ -203,7 +209,12 @@ async def transcribe_audio(file_path: str) -> str:
         "Transcribe exactly what they say in Hindi, outputting standard text. Do not summarize or reply. "
         "If they speak Hindi words in English letters (Hinglish), transcribe it in natural Hindi script (Devanagari) or Hinglish as they spoke it."
     )
-    transcription = generate_with_fallback([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
+    # Part.from_bytes, not a {"mime_type", "data"} dict: that was the old
+    # google-generativeai format, which google-genai rejects - so this
+    # fallback could never succeed and a voice note silently became "".
+    transcription = await asyncio.to_thread(
+        generate_with_fallback, [prompt, types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")]
+    )
     if transcription:
         logger.info(f"Gemini ASR Success: {transcription}")
         return transcription
@@ -263,7 +274,6 @@ async def synthesize_speech(text: str) -> bytes:
                     elif response.status_code in [401, 402, 403, 429]:
                         logger.warning(f"Sarvam TTS key exhausted/blocked ({response.status_code}: {response.text}). Rotating...")
                         rotate_sarvam_key()
-                        continue
                         continue
                     else:
                         logger.warning(f"Sarvam TTS returned error {response.status_code}: {response.text}")

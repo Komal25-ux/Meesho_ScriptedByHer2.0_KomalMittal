@@ -1,4 +1,5 @@
 from backend.core.gemini_utils import generate_structured_with_fallback, CatalogCaptionResponse
+from backend.core.prompt_safety import keep_if_prices_grounded
 
 __all__ = ["generate_whatsapp_caption"]
 
@@ -51,7 +52,13 @@ Isolate and transcribe ONLY the product name "{product_name}" phonetically into 
 Image handling is managed entirely by the system - the caller already has the product image and does not need it echoed back. Do not attempt to output an image URL yourself, it is not part of your output schema.
 You must output your response using the provided JSON schema: ui_text, tts_text, product_name_tts.
 """
-    result = generate_structured_with_fallback(catalog_prompt, CatalogCaptionResponse)
+    # The caption is posted to the reseller's WhatsApp groups as-is, so it
+    # may only ever state the price she is actually selling at.
+    result = keep_if_prices_grounded(
+        generate_structured_with_fallback(catalog_prompt, CatalogCaptionResponse),
+        [selling_price],
+        where="WhatsApp caption",
+    )
     if result:
         return result
 

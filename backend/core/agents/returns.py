@@ -10,14 +10,14 @@ from backend.core.gemini_utils import (
 
 
 def run_returns_proactive_outreach(
-    whatsapp_number: str, order_id: str, product_name: str, reseller_name: str = "Sunita Didi"
+    session_id: str, order_id: str, product_name: str, reseller_name: str = "Sunita Didi"
 ) -> Dict[str, Any]:
     # Seed the Returns Retention Funnel's pending state so the customer's next
     # reply (whichever grievance they describe) is intercepted by
     # check_pending_return instead of falling through to normal intent
     # detection. Keyed the same way as PENDING_LISTINGS/PENDING_RETURNS
     # elsewhere - this system event always targets the Customer segment.
-    pending_key = _pending_key(whatsapp_number, "customer")
+    pending_key = _pending_key(session_id, "customer")
     PENDING_RETURNS[pending_key] = {
         "order_id": order_id,
         "product_name": product_name,

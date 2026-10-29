@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # Install system dependencies (FFmpeg is required for WebM-to-WAV transcoding)
 RUN apt-get update && apt-get install -y \
@@ -21,4 +21,6 @@ COPY . .
 EXPOSE 8000
 
 # Start FastAPI server using uvicorn
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers: behind Render's proxy, take the client address from
+# X-Forwarded-For so per-IP rate limits see real users, not the proxy.
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

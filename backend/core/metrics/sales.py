@@ -8,7 +8,7 @@ __all__ = ["_extract_timeframe_days", "_aggregate_sales_for_window"]
 def _extract_timeframe_days(user_input: str, default_days: int = 7) -> int:
     """Pulls a requested day-count out of phrasing like "15 din ka data" or
     "pichle 30 days" -> 15 / 30. Deterministic regex, not an LLM call - the
-    same reasoning as _extract_price above: pulling one number out of text is
+    same reasoning as pricing.requested_price: pulling one number out of text is
     a task regex handles reliably and near-instantly, so spending a full
     model round-trip on it would only add latency for no accuracy benefit."""
     match = re.search(r"\b(\d{1,3})\s*(?:din|dino|days?)\b", user_input, re.IGNORECASE)
@@ -30,7 +30,7 @@ def _aggregate_sales_for_window(transactions: list, days: int) -> Dict[str, Any]
     if not transactions:
         return {
             "days": days, "total_revenue": 0, "total_profit": 0,
-            "top_selling_item": None, "top_category": None, "order_count": 0
+            "top_selling_item": None, "top_category": None, "most_profitable_category": None, "order_count": 0
         }
 
     anchor = max(t["date"] for t in transactions)
@@ -45,12 +45,18 @@ def _aggregate_sales_for_window(transactions: list, days: int) -> Dict[str, Any]
 
     quantity_by_item: Dict[str, int] = {}
     revenue_by_category: Dict[str, int] = {}
+    profit_by_category: Dict[str, int] = {}
     for t in filtered:
         quantity_by_item[t["productName"]] = quantity_by_item.get(t["productName"], 0) + t["quantity"]
         revenue_by_category[t["category"]] = revenue_by_category.get(t["category"], 0) + t["revenue"]
+        profit_by_category[t["category"]] = profit_by_category.get(t["category"], 0) + t["profit"]
 
     top_selling_item = max(quantity_by_item, key=quantity_by_item.get) if quantity_by_item else None
     top_category = max(revenue_by_category, key=revenue_by_category.get) if revenue_by_category else None
+    # Not the same as top_category: a low-margin category can sell the most
+    # while a high-margin one earns the most. The coaching talks about profit,
+    # so it needs this one; it used to name the revenue leader instead.
+    most_profitable_category = max(profit_by_category, key=profit_by_category.get) if profit_by_category else None
 
     return {
         "days": days,
@@ -58,5 +64,6 @@ def _aggregate_sales_for_window(transactions: list, days: int) -> Dict[str, Any]
         "total_profit": total_profit,
         "top_selling_item": top_selling_item,
         "top_category": top_category,
+        "most_profitable_category": most_profitable_category,
         "order_count": len(filtered),
     }

@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" width="1200" height="480" role="img" aria-labelledby="hero-t hero-d">
+  <title id="hero-t">Sakhi — the AI business didi for every Meesho reseller</title>
+  <desc id="hero-d">Sakhi is a voice-first, Hindi-first agentic AI co-pilot. Four specialist agents (Catalog, Customer, Growth and Returns), routed by a LangGraph orchestrator, run a reseller's business. Meesho ScriptedBy Her 2.0, Top 50 of 36,000+.</desc>
+  <defs>
+    <linearGradient id="hero-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B0A19"/><stop offset="1" stop-color="#11050F"/></linearGradient>
+    <radialGradient id="hero-glow" cx="78%" cy="40%" r="70%"><stop offset="0" stop-color="#9F2089" stop-opacity=".7"/><stop offset="1" stop-color="#4A1445" stop-opacity="0"/></radialGradient>
+    <filter id="hero-glowf" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <radialGradient id="hero-orb" cx="40%" cy="35%" r="70%"><stop offset="0" stop-color="#D24BBE"/><stop offset=".6" stop-color="#9F2089"/><stop offset="1" stop-color="#5A1252"/></radialGradient>
+    <radialGradient id="hero-mango" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#FC8B16" stop-opacity=".22"/><stop offset="1" stop-color="#FC8B16" stop-opacity="0"/></radialGradient>
+    <linearGradient id="hero-name" gradientUnits="userSpaceOnUse" x1="60" y1="0" x2="330" y2="0"><stop offset="0" stop-color="#FCF2F9"/><stop offset="1" stop-color="#F7C9EE"/></linearGradient>
+    <linearGradient id="hero-sheen" gradientUnits="userSpaceOnUse" x1="-240" y1="0" x2="-40" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".8"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+      <animateTransform attributeName="gradientTransform" type="translate" values="0 0;640 0;640 0" keyTimes="0;.3;1" dur="9s" begin="2.5s" repeatCount="indefinite"/>
+    </linearGradient>
+    <pattern id="hero-dots" width="26" height="26" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" fill="#E27BD0" fill-opacity=".14"/></pattern>
+    <radialGradient id="hero-fade" cx="75%" cy="45%" r="55%"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>
+    <mask id="hero-mask"><rect width="1200" height="480" fill="url(#hero-fade)"/></mask>
+    <clipPath id="hero-clip"><rect width="1200" height="480" rx="20"/></clipPath>
+  </defs>
+  <style>
+    .hero-serif { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif; }
+    .hero-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .hero-sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .hero-rise { animation: hero-rise 1.3s cubic-bezier(.16,1,.3,1) both; }
+    .hero-fade { animation: hero-fade 1.6s ease both; }
+    .hero-ring { transform-origin: 0 0; animation: hero-ring 3.6s cubic-bezier(.2,.6,.3,1) infinite; }
+    .hero-bar { transform-box: fill-box; transform-origin: center; animation: hero-bar 1s ease-in-out infinite alternate; }
+    .hero-draw { stroke-dasharray: 700; stroke-dashoffset: 700; animation: hero-draw 2.2s cubic-bezier(.65,0,.35,1) 1s forwards; }
+    @keyframes hero-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+    @keyframes hero-fade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes hero-ring { from { transform: scale(1); opacity: .9; } to { transform: scale(2.3); opacity: 0; } }
+    @keyframes hero-bar { from { transform: scaleY(.3); } to { transform: scaleY(1); } }
+    @keyframes hero-draw { to { stroke-dashoffset: 0; } }
+    @media (prefers-reduced-motion: reduce) { .hero-rise, .hero-fade, .hero-ring, .hero-bar { animation: none; } .hero-draw { animation: none; stroke-dashoffset: 0; } }
+  </style>
+  <g clip-path="url(#hero-clip)">
+  <rect width="1200" height="480" rx="20" fill="url(#hero-bg)"/>
+  <rect width="1200" height="480" rx="20" fill="url(#hero-glow)"/>
+  <rect x=".5" y=".5" width="1199" height="479" rx="19.5" fill="none" stroke="#E27BD0" stroke-opacity=".2"/>
+  <rect x="10" y="10" width="1180" height="460" rx="13" fill="none" stroke="#F43397" stroke-opacity=".22" stroke-dasharray="5 6"/>
+    <rect width="1200" height="480" fill="url(#hero-dots)" mask="url(#hero-mask)"/>
+    <ellipse cx="160" cy="470" rx="380" ry="200" fill="url(#hero-mango)"/>
+
+    <!-- Copy -->
+    <g class="hero-rise" style="animation-delay:.1s">
+      <line x1="72" y1="78" x2="102" y2="78" stroke="#FC8B16"/>
+      <text class="hero-mono" x="114" y="82" font-size="12" letter-spacing="3" fill="#FFBE76">MEESHO SCRIPTEDBY{HER} 2.0 · TOP 50 OF 36,000+</text>
+    </g>
+    <g class="hero-rise" style="animation-delay:.3s">
+      <text class="hero-serif" x="66" y="190" font-size="112" font-weight="300" letter-spacing="-3" fill="url(#hero-name)">Sakhi</text>
+      <text class="hero-serif" x="66" y="190" font-size="112" font-weight="300" letter-spacing="-3" fill="url(#hero-sheen)">Sakhi</text>
+      <text class="hero-sans" x="378" y="186" font-size="46" font-weight="300" fill="#FC8B16">सखी</text>
+    </g>
+    <path class="hero-draw" d="M72 214 C 200 208, 380 220, 560 210" fill="none" stroke="#F43397" stroke-width="1.6" stroke-dasharray="6 6" stroke-opacity=".8"/>
+    <g class="hero-rise" style="animation-delay:.55s">
+      <text class="hero-serif" x="72" y="262" font-size="26" font-style="italic" fill="#FCF2F9">The AI business didi for every Meesho reseller.</text>
+    </g>
+    <g class="hero-rise" style="animation-delay:.8s">
+      <text class="hero-sans" x="72" y="300" font-size="16" fill="#C2A9BC">She speaks in Hindi. Four agents list her products, answer her buyers,</text>
+      <text class="hero-sans" x="72" y="324" font-size="16" fill="#C2A9BC">coach her growth and save her returns, all grounded in real data.</text>
+    </g>
+    <g class="hero-rise" style="animation-delay:1.30s"><rect x="72" y="356" width="87" height="28" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".4"/><text class="hero-mono" x="115.5" y="374.5" font-size="11.5" text-anchor="middle" fill="#F7C9EE">LangGraph</text></g><g class="hero-rise" style="animation-delay:1.38s"><rect x="167" y="356" width="73" height="28" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".4"/><text class="hero-mono" x="203.5" y="374.5" font-size="11.5" text-anchor="middle" fill="#F7C9EE">FastAPI</text></g><g class="hero-rise" style="animation-delay:1.46s"><rect x="248" y="356" width="66" height="28" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".4"/><text class="hero-mono" x="281" y="374.5" font-size="11.5" text-anchor="middle" fill="#F7C9EE">Gemini</text></g><g class="hero-rise" style="animation-delay:1.54s"><rect x="322" y="356" width="136" height="28" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".4"/><text class="hero-mono" x="390" y="374.5" font-size="11.5" text-anchor="middle" fill="#F7C9EE">Sarvam ASR · TTS</text></g><g class="hero-rise" style="animation-delay:1.62s"><rect x="466" y="356" width="80" height="28" rx="14" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".4"/><text class="hero-mono" x="506" y="374.5" font-size="11.5" text-anchor="middle" fill="#F7C9EE">pgvector</text></g>
+
+    <!-- Voice orb and the four agents it routes to -->
+    <g class="hero-fade" style="animation-delay:.6s">
+      <path d="M905 200 Q 795.0 116.0 745 92" fill="none" stroke="#E27BD0" stroke-opacity=".35" stroke-dasharray="3 5"/><path d="M905 200 Q 1013.5 116.0 1062 92" fill="none" stroke="#E27BD0" stroke-opacity=".35" stroke-dasharray="3 5"/><path d="M905 200 Q 1020.0 220.0 1075 300" fill="none" stroke="#E27BD0" stroke-opacity=".35" stroke-dasharray="3 5"/><path d="M905 200 Q 790.0 220.0 735 300" fill="none" stroke="#E27BD0" stroke-opacity=".35" stroke-dasharray="3 5"/>
+      <circle r="3.5" fill="#FFBE76" filter="url(#hero-glowf)" opacity="0">
+        <animateMotion path="M905 200 Q 795.0 116.0 745 92" dur="8s" begin="1.0s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.08;1" calcMode="linear"/>
+        <animate attributeName="opacity" values="0;1;0;0" keyTimes="0;.02;.09;1" dur="8s" begin="1.0s" repeatCount="indefinite"/>
+      </circle><circle r="3.5" fill="#FFBE76" filter="url(#hero-glowf)" opacity="0">
+        <animateMotion path="M905 200 Q 1013.5 116.0 1062 92" dur="8s" begin="3.0s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.08;1" calcMode="linear"/>
+        <animate attributeName="opacity" values="0;1;0;0" keyTimes="0;.02;.09;1" dur="8s" begin="3.0s" repeatCount="indefinite"/>
+      </circle><circle r="3.5" fill="#FFBE76" filter="url(#hero-glowf)" opacity="0">
+        <animateMotion path="M905 200 Q 1020.0 220.0 1075 300" dur="8s" begin="5.0s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.08;1" calcMode="linear"/>
+        <animate attributeName="opacity" values="0;1;0;0" keyTimes="0;.02;.09;1" dur="8s" begin="5.0s" repeatCount="indefinite"/>
+      </circle><circle r="3.5" fill="#FFBE76" filter="url(#hero-glowf)" opacity="0">
+        <animateMotion path="M905 200 Q 790.0 220.0 735 300" dur="8s" begin="7.0s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.08;1" calcMode="linear"/>
+        <animate attributeName="opacity" values="0;1;0;0" keyTimes="0;.02;.09;1" dur="8s" begin="7.0s" repeatCount="indefinite"/>
+      </circle>
+      <g transform="translate(905 200)">
+        <circle class="hero-ring" style="animation-delay:0.0s" r="62" fill="none" stroke="#F7C9EE" stroke-opacity=".5"/><circle class="hero-ring" style="animation-delay:1.2s" r="62" fill="none" stroke="#F7C9EE" stroke-opacity=".5"/><circle class="hero-ring" style="animation-delay:2.4s" r="62" fill="none" stroke="#F7C9EE" stroke-opacity=".5"/>
+        <circle r="62" fill="url(#hero-orb)" stroke="#F7C9EE" stroke-opacity=".6"/>
+        <circle r="62" fill="none" stroke="#F43397" stroke-opacity=".7" stroke-dasharray="4 5" transform="scale(1.12)"/>
+        <rect class="hero-bar" style="animation-delay:0.00s;animation-duration:0.60s" x="-28.0" y="-5.0" width="3" height="10" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.11s;animation-duration:0.80s" x="-21.8" y="-9.0" width="3" height="18" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.22s;animation-duration:1.00s" x="-15.6" y="-14.0" width="3" height="28" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.33s;animation-duration:0.70s" x="-9.4" y="-8.0" width="3" height="16" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.44s;animation-duration:0.90s" x="-3.2" y="-17.0" width="3" height="34" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.55s;animation-duration:0.60s" x="3.0" y="-11.0" width="3" height="22" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.66s;animation-duration:0.80s" x="9.2" y="-6.0" width="3" height="12" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.77s;animation-duration:1.00s" x="15.4" y="-13.0" width="3" height="26" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.88s;animation-duration:0.70s" x="21.6" y="-7.0" width="3" height="14" rx="1.5" fill="#FCF2F9"/><rect class="hero-bar" style="animation-delay:-0.99s;animation-duration:0.90s" x="27.8" y="-4.0" width="3" height="8" rx="1.5" fill="#FCF2F9"/>
+      </g>
+      <g transform="translate(699 75)">
+        <rect width="93" height="34" rx="17" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".45">
+          <animate attributeName="stroke-opacity" values=".45;1;.45;.45" keyTimes="0;.06;.2;1" dur="8s" begin="1.6s" repeatCount="indefinite"/>
+          <animate attributeName="fill" values="#2B0F28;#4A1445;#2B0F28;#2B0F28" keyTimes="0;.06;.2;1" dur="8s" begin="1.6s" repeatCount="indefinite"/>
+        </rect>
+        <text class="hero-mono" x="46" y="21.5" font-size="11.5" text-anchor="middle" fill="#FCF2F9">Catalog</text>
+      </g><g transform="translate(1011 75)">
+        <rect width="101" height="34" rx="17" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".45">
+          <animate attributeName="stroke-opacity" values=".45;1;.45;.45" keyTimes="0;.06;.2;1" dur="8s" begin="3.6s" repeatCount="indefinite"/>
+          <animate attributeName="fill" values="#2B0F28;#4A1445;#2B0F28;#2B0F28" keyTimes="0;.06;.2;1" dur="8s" begin="3.6s" repeatCount="indefinite"/>
+        </rect>
+        <text class="hero-mono" x="51" y="21.5" font-size="11.5" text-anchor="middle" fill="#FCF2F9">Customer</text>
+      </g><g transform="translate(1033 283)">
+        <rect width="84" height="34" rx="17" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".45">
+          <animate attributeName="stroke-opacity" values=".45;1;.45;.45" keyTimes="0;.06;.2;1" dur="8s" begin="5.6s" repeatCount="indefinite"/>
+          <animate attributeName="fill" values="#2B0F28;#4A1445;#2B0F28;#2B0F28" keyTimes="0;.06;.2;1" dur="8s" begin="5.6s" repeatCount="indefinite"/>
+        </rect>
+        <text class="hero-mono" x="42" y="21.5" font-size="11.5" text-anchor="middle" fill="#FCF2F9">Growth</text>
+      </g><g transform="translate(689 283)">
+        <rect width="93" height="34" rx="17" fill="#2B0F28" stroke="#E27BD0" stroke-opacity=".45">
+          <animate attributeName="stroke-opacity" values=".45;1;.45;.45" keyTimes="0;.06;.2;1" dur="8s" begin="7.6s" repeatCount="indefinite"/>
+          <animate attributeName="fill" values="#2B0F28;#4A1445;#2B0F28;#2B0F28" keyTimes="0;.06;.2;1" dur="8s" begin="7.6s" repeatCount="indefinite"/>
+        </rect>
+        <text class="hero-mono" x="46" y="21.5" font-size="11.5" text-anchor="middle" fill="#FCF2F9">Returns</text>
+      </g>
+      <text class="hero-mono" x="905" y="298" font-size="10" letter-spacing="2.2" text-anchor="middle" fill="#C2A9BC">LANGGRAPH ORCHESTRATOR</text>
+    </g>
+
+    <!-- Hindi voice bubble -->
+    <g class="hero-rise" style="animation-delay:1.4s">
+      <rect x="690" y="348" width="430" height="46" rx="16" fill="#FCF2F9" fill-opacity=".06" stroke="#F43397" stroke-opacity=".55" stroke-dasharray="5 4"/>
+      <text class="hero-sans" x="712" y="377" font-size="16" fill="#FCF2F9">“मेरी नई साड़ी लिस्ट कर दो”</text>
+      <text class="hero-mono" x="1100" y="376" font-size="10" letter-spacing="1.6" text-anchor="end" fill="#FFBE76">VOICE · HI</text>
+    </g>
+
+    <!-- Meta strip -->
+    <g class="hero-fade" style="animation-delay:1.6s">
+      <line x1="72" y1="428" x2="1128" y2="428" stroke="#E27BD0" stroke-opacity=".18"/>
+      <text class="hero-mono" x="72" y="452" font-size="10.5" letter-spacing="2" fill="#C2A9BC">VOICE-FIRST · VERNACULAR-FIRST · GROUNDED IN HER REAL CATALOG</text>
+      <text class="hero-mono" x="1128" y="452" font-size="10.5" letter-spacing="2" text-anchor="end" fill="#F7C9EE">LIVE · MEESHO-SAKHI-KOMAL25.VERCEL.APP</text>
+    </g>
+  </g>
+</svg>

@@ -1,16 +1,36 @@
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from supabase import create_client, Client
 from backend.config import settings
+from backend.errors import DependencyUnavailable
 
 logger = logging.getLogger("sakhi-backend")
 
+PRODUCT_COLUMNS = (
+    "product_id,name,category,suggested_selling_price_inr,meesho_cost_inr,return_window_days,"
+    "cod_available,description,sizes,colors,material,base_image_url"
+)
+
+def _unavailable(operation: str, error: Exception) -> DependencyUnavailable:
+    logger.error(f"Supabase {operation} failed: {error}")
+    return DependencyUnavailable(f"Supabase {operation} failed")
+
+
 class SupabaseDB:
+    """Every method below either returns real data or raises
+    DependencyUnavailable - except the two telemetry writes
+    (save_conversation_turn, log_agent_event), which only log, since a lost
+    trace line must never fail a user's turn. With no credentials the client
+    runs in mock mode for local development; production refuses to start in
+    that state rather than serve demo data as if it were real."""
+
     def __init__(self):
         self.url = settings.SUPABASE_URL
         self.key = settings.SUPABASE_SERVICE_KEY
         self.client = None
-        
+        self._mock_orders = []  # mock mode only, so local runs dedupe orders too
+
         # Safe initialization
         if self.url and self.key and "YOUR_SUPABASE" not in self.url and "YOUR_SUPABASE" not in self.key:
             try:
@@ -20,6 +40,12 @@ class SupabaseDB:
                 logger.error(f"[ERROR] Failed to initialize Supabase client: {e}")
         else:
             logger.warning("[WARNING] Supabase credentials missing or set to placeholder. Database will run in MOCK mode.")
+
+        if self.client is None and settings.ENVIRONMENT == "production":
+            raise RuntimeError(
+                "ENVIRONMENT=production but Supabase is not configured or failed to initialise; "
+                "refusing to start on mock data"
+            )
 
     def is_mock(self) -> bool:
         return self.client is None
@@ -63,15 +89,7 @@ class SupabaseDB:
             self.client.table("reseller_profiles").insert(new_profile).execute()
             return reseller
         except Exception as e:
-            logger.error(f"Error in get_or_create_reseller: {e}")
-            return {
-                "id": "00000000-0000-0000-0000-000000000000",
-                "whatsapp_number": whatsapp_number,
-                "name": "Sunita Didi (Fallback)",
-                "location": "Kanpur, UP",
-                "language": "hi",
-                "dialect": "hindi"
-            }
+            raise _unavailable("get_or_create_reseller", e) from e
 
     def get_reseller_profile(self, reseller_id: str) -> dict:
         """Get full reseller profile with metrics."""
@@ -86,8 +104,7 @@ class SupabaseDB:
             res = self.client.table("reseller_profiles").select("*").eq("reseller_id", reseller_id).execute()
             return res.data[0] if res.data else {}
         except Exception as e:
-            logger.error(f"Error in get_reseller_profile: {e}")
-            return {}
+            raise _unavailable("get_reseller_profile", e) from e
 
     def save_listing(self, listing_data: dict) -> dict:
         """Insert a new listing and return it."""
@@ -95,110 +112,79 @@ class SupabaseDB:
             return {"id": "mock-listing-id", **listing_data}
         try:
             res = self.client.table("listings").insert(listing_data).execute()
-            return res.data[0] if res.data else {}
         except Exception as e:
-            logger.error(f"Error in save_listing: {e}")
-            return {"id": "error-listing-id", **listing_data}
+            raise _unavailable("save_listing", e) from e
+        if not res.data:
+            raise DependencyUnavailable("Supabase save_listing returned no row")
+        return res.data[0]
 
-    def get_active_listings(self, reseller_id: str) -> list:
-        """Get all active listings for a reseller."""
+    def get_listing(self, reseller_id: str, product_id: str) -> Optional[dict]:
+        """This reseller's live listing of a product - {"id", "selling_price_inr"}
+        - or None if she hasn't listed it. A confirmed order can legitimately
+        come before the listing does, so None is a normal answer, not an
+        error. The newest listing wins if the product was listed twice."""
         if self.is_mock():
-            return [
-                {
-                    "id": "mock-list-1",
-                    "product_id": "SKU_001",
-                    "product_name": "Red Banarasi Silk Saree",
-                    "category": "sarees",
-                    "selling_price_inr": 599,
-                    "cost_price_inr": 420,
-                    "margin_inr": 179,
-                    "whatsapp_caption": "Saree post caption"
-                }
+            return {"id": "mock-listing-id", "selling_price_inr": 599} if product_id == "SKU_001" else None
+        try:
+            res = (
+                self.client.table("listings").select("id,selling_price_inr")
+                .eq("reseller_id", reseller_id).eq("product_id", product_id).eq("is_active", True)
+                .order("created_at", desc=True).limit(1).execute()
+            )
+        except Exception as e:
+            raise _unavailable("get_listing", e) from e
+        return res.data[0] if res.data else None
+
+    def find_recent_order(self, session_id: str, product_id: str, within: timedelta) -> Optional[dict]:
+        """The newest order this conversation placed for this product within
+        `within`, if any. A second "order kar do" for the same product soon
+        after the first - typically re-typed after an error - is the same
+        order, not a new one."""
+        cutoff = datetime.now(timezone.utc) - within
+        if self.is_mock():
+            matches = [
+                o for o in self._mock_orders
+                if o.get("session_id") == session_id and o.get("product_id") == product_id and o["ordered_at"] >= cutoff
             ]
+            return dict(matches[-1]) if matches else None
         try:
-            res = self.client.table("listings").select("*").eq("reseller_id", reseller_id).eq("is_active", True).execute()
-            return res.data or []
+            res = (
+                self.client.table("orders").select("*")
+                .eq("session_id", session_id).eq("product_id", product_id).gte("ordered_at", cutoff.isoformat())
+                .order("ordered_at", desc=True).limit(1).execute()
+            )
         except Exception as e:
-            logger.error(f"Error in get_active_listings: {e}")
-            return []
-
-    def is_product_listed(self, reseller_id: str, product_id: str) -> bool:
-        """Check if a product is listed by a reseller."""
-        if self.is_mock():
-            return product_id == "SKU_001"
-        try:
-            res = self.client.table("listings").select("id").eq("reseller_id", reseller_id).eq("product_id", product_id).eq("is_active", True).execute()
-            return bool(res.data)
-        except Exception as e:
-            logger.error(f"Error in is_product_listed: {e}")
-            return False
-
-    def get_listing_id(self, reseller_id: str, product_id: str) -> Optional[str]:
-        """Resolve this reseller's own active listing row id for a product, if
-        any - the FK save_order needs for orders.listing_id. Returns None for
-        an unlisted product rather than raising, since a confirmed order can
-        legitimately happen before the reseller has listed the item."""
-        if self.is_mock():
-            return "mock-listing-id" if product_id == "SKU_001" else None
-        try:
-            res = self.client.table("listings").select("id").eq("reseller_id", reseller_id).eq("product_id", product_id).eq("is_active", True).limit(1).execute()
-            return res.data[0]["id"] if res.data else None
-        except Exception as e:
-            logger.error(f"Error in get_listing_id: {e}")
-            return None
+            raise _unavailable("find_recent_order", e) from e
+        return res.data[0] if res.data else None
 
     def save_order(self, order_data: dict) -> dict:
-        """Save a transaction order."""
+        """Insert an order and return the stored row. With a client_message_id
+        the write is idempotent: orders.client_message_id is unique, so a
+        replay of the same request - even one racing the original - gets the
+        order that request already created instead of a second one."""
         if self.is_mock():
-            return {"id": "mock-order-id", **order_data}
+            key = order_data.get("client_message_id")
+            existing = next((o for o in self._mock_orders if key and o.get("client_message_id") == key), None)
+            if existing:
+                return dict(existing)
+            row = {"id": f"mock-order-{len(self._mock_orders) + 1}", "ordered_at": datetime.now(timezone.utc), **order_data}
+            self._mock_orders.append(row)
+            return dict(row)
+        key = order_data.get("client_message_id")
         try:
-            res = self.client.table("orders").insert(order_data).execute()
-            return res.data[0] if res.data else {}
+            if not key:
+                res = self.client.table("orders").insert(order_data).execute()
+            else:
+                res = self.client.table("orders").upsert(
+                    order_data, on_conflict="client_message_id", ignore_duplicates=True
+                ).execute()
+                if not res.data:  # a duplicate: nothing inserted, return the original
+                    res = self.client.table("orders").select("*").eq("client_message_id", key).limit(1).execute()
         except Exception as e:
-            logger.error(f"Error in save_order: {e}")
-            return {}
-
-    def get_weekly_analytics(self, reseller_id: str) -> dict:
-        """Aggregate orders for current week."""
-        if self.is_mock():
-            return {
-                "sales_this_week_inr": 2396,
-                "profit_this_week_inr": 720,
-                "orders_count": 4,
-                "active_listings_count": 5
-            }
-        try:
-            # Query listings to get counts
-            listings_res = self.client.table("listings").select("id", count="exact").eq("reseller_id", reseller_id).eq("is_active", True).execute()
-            listings_count = listings_res.count if listings_res.count is not None else 0
-            
-            # Query orders
-            orders_res = self.client.table("orders").select("total_amount_inr, listing_id").eq("reseller_id", reseller_id).execute()
-            
-            total_sales = 0
-            total_profit = 0
-            orders_list = orders_res.data or []
-            
-            # Simple margin calc (fetching cost price from listing lookup)
-            for order in orders_list:
-                total_sales += order["total_amount_inr"]
-                # Assume 25% profit margin for simplicity in mock aggregates
-                total_profit += int(order["total_amount_inr"] * 0.25)
-                
-            return {
-                "sales_this_week_inr": total_sales,
-                "profit_this_week_inr": total_profit,
-                "orders_count": len(orders_list),
-                "active_listings_count": listings_count
-            }
-        except Exception as e:
-            logger.error(f"Error in get_weekly_analytics: {e}")
-            return {
-                "sales_this_week_inr": 0,
-                "profit_this_week_inr": 0,
-                "orders_count": 0,
-                "active_listings_count": 0
-            }
+            raise _unavailable("save_order", e) from e
+        if not res.data:
+            raise DependencyUnavailable("Supabase save_order returned no row")
+        return res.data[0]
 
     def save_conversation_turn(self, turn_data: dict) -> None:
         """Log conversation turn for history."""
@@ -209,30 +195,17 @@ class SupabaseDB:
         except Exception as e:
             logger.error(f"Error in save_conversation_turn: {e}")
 
-    def get_conversation_history(self, reseller_id: str, limit: int = 10) -> list:
-        """Fetch past dialogs."""
-        if self.is_mock():
-            return []
-        try:
-            res = self.client.table("conversations").select("*").eq("reseller_id", reseller_id).order("created_at", desc=True).limit(limit).execute()
-            # Return in chronological order
-            history = res.data or []
-            history.reverse()
-            return [{"role": h["role"], "content": h["content"]} for h in history]
-        except Exception as e:
-            logger.error(f"Error in get_conversation_history: {e}")
-            return []
-
     def save_return(self, return_data: dict) -> dict:
         """Save a return request."""
         if self.is_mock():
             return {"id": "mock-return-id", **return_data}
         try:
             res = self.client.table("returns").insert(return_data).execute()
-            return res.data[0] if res.data else {}
         except Exception as e:
-            logger.error(f"Error in save_return: {e}")
-            return {}
+            raise _unavailable("save_return", e) from e
+        if not res.data:
+            raise DependencyUnavailable("Supabase save_return returned no row")
+        return res.data[0]
 
     def log_agent_event(self, event_data: dict) -> None:
         """Save telemetry updates to agent_events table."""
@@ -258,11 +231,13 @@ class SupabaseDB:
                     return p
             return None
         try:
-            res = self.client.table("product_embeddings").select("*").ilike("name", product_name.strip()).limit(1).execute()
+            # Every column except the 768-float embedding, which nothing reads
+            # and which would otherwise be copied into session state with the
+            # product (see LAST_VIEWED_PRODUCT).
+            res = self.client.table("product_embeddings").select(PRODUCT_COLUMNS).ilike("name", product_name.strip()).limit(1).execute()
             return res.data[0] if res.data else None
         except Exception as e:
-            logger.error(f"Error in get_product_by_name: {e}")
-            return None
+            raise _unavailable("get_product_by_name", e) from e
 
     def match_products(
         self,
@@ -275,14 +250,11 @@ class SupabaseDB:
         """Semantic search over the product vector catalog in Supabase.
 
         category_filter/exclude_ids power category-strict pagination (see
-        run_customer_agent/run_catalog_agent's "show more" handling): the
-        underlying match_products Postgres RPC only does vector similarity,
-        with no category or exclusion-list parameter, and there's no live
-        access here to alter that RPC's SQL. So instead we over-fetch a wider
-        similarity-ranked candidate pool from the RPC unchanged, then apply
-        the category/exclusion filtering in Python before slicing back down
-        to `limit` - functionally equivalent to a `WHERE category = ... AND
-        id NOT IN (...) LIMIT n` clause, just evaluated client-side.
+        run_customer_agent/run_catalog_agent's "show more" handling). They are
+        applied inside Postgres by match_products_filtered (supabase_schema.sql
+        section 14), so the database returns exactly `limit` rows that pass
+        the filters. This used to over-fetch up to 100 candidates and filter
+        them in Python, which only worked because the catalog is small.
         """
         exclude_set = set(exclude_ids or [])
 
@@ -294,7 +266,12 @@ class SupabaseDB:
             ]
             return filtered[:limit]
 
-        if self.is_mock() or not query_embedding:
+        if not self.is_mock() and not query_embedding:
+            # No query to search with (an empty message). This used to fall
+            # into the mock branch below and return the demo catalog as if
+            # it were a real search result.
+            return []
+        if self.is_mock():
             # Return static fallback catalog items matching RAG
             logger.warning("[RAG] Supabase connection is mock, returning static catalog mock values.")
             mock_catalog = [
@@ -328,38 +305,25 @@ class SupabaseDB:
                 }
             ]
             return _apply_filters(mock_catalog)
+        # A category browse ("aur saree dikhao") drops the similarity threshold:
+        # a generic "show more" phrase barely resembles any one product, and
+        # every item in the category is a valid answer, so the threshold
+        # would only end the browse early with items still unseen.
+        params = {
+            "query_embedding": query_embedding,
+            "match_threshold": 0.0 if category_filter else threshold,
+            "match_count": limit,
+        }
+        if category_filter or exclude_set:
+            rpc_name = "match_products_filtered"
+            params["category_filter"] = category_filter
+            params["exclude_ids"] = sorted(exclude_set)
+        else:
+            rpc_name = "match_products"
         try:
-            # Over-fetch well past `limit` so there's still enough left after
-            # category/exclusion filtering - a plain `match_count: limit`
-            # would starve pagination almost immediately once a few items in
-            # the category had already been shown/excluded.
-            #
-            # When category_filter is set, also relax match_threshold to ~0:
-            # the RPC applies that threshold SERVER-SIDE, before Python ever
-            # sees the candidates, so a generic "show more" continuation
-            # phrase (weak/no embedding correlation to any specific product)
-            # would otherwise get many genuinely-in-category items filtered
-            # out by similarity before category filtering even runs -
-            # falsely "exhausting" a category that still has items left. A
-            # category-strict browse doesn't need similarity ranking at all
-            # (any item in the category is a valid result - see the
-            # docstring's note on ordering); fetch_count is set high enough
-            # to realistically cover this catalog's full category sizes
-            # (~12-22 items each) so every real item gets a chance to surface.
-            effective_threshold = 0.0 if category_filter else threshold
-            fetch_count = 100 if category_filter else (max(limit * 5, 20) if exclude_set else limit)
-            res = self.client.rpc(
-                "match_products",
-                {
-                    "query_embedding": query_embedding,
-                    "match_threshold": effective_threshold,
-                    "match_count": fetch_count
-                }
-            ).execute()
-            candidates = res.data or []
-            return _apply_filters(candidates) if (category_filter or exclude_set) else candidates
+            res = self.client.rpc(rpc_name, params).execute()
+            return res.data or []
         except Exception as e:
-            logger.error(f"Error in match_products RPC: {e}")
-            return []
+            raise _unavailable("match_products", e) from e
 
 db_client = SupabaseDB()

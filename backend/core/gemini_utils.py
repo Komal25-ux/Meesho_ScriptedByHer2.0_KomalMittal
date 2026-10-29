@@ -2,6 +2,7 @@ import logging
 from typing import Literal, Optional, Type, TypeVar
 from google import genai
 from google.genai import types
+from backend.errors import DependencyUnavailable
 from pydantic import BaseModel, Field
 from backend.config import settings
 
@@ -319,4 +320,6 @@ def embed_content_with_fallback(text: str, task_type: str = "retrieval_query", o
             if num_keys > 1:
                 rotate_gemini_key()
     logger.error(f"All Gemini keys failed for embedding generation. Last error: {last_error}")
-    return []
+    # Not [] - an empty vector means "nothing to search for", and the caller
+    # would answer as if the catalog had no match.
+    raise DependencyUnavailable("Gemini embeddings unavailable") from last_error

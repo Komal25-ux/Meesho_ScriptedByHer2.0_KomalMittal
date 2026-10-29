@@ -37,28 +37,30 @@ CUSTOMER_DETAILS_TRIGGER_RE = re.compile(r"^mujhe ye wala item pasand hai,?\s*is
 # trigger the exhaustion message.
 REAL_CATEGORIES: List[str] = ["sarees", "kurtis", "suits", "tops", "lehengas", "dresses"]
 
-# Kept only as the last-resort fallback for classify_approval_intent() below,
-# used if the Gemini call itself is unreachable. The primary router is an LLM
-# classification, not keyword matching - see classify_approval_intent().
+# Keyword lists below are only the last-resort fallback for the LLM
+# classifiers in backend/core/routing/, used when Gemini is unreachable. They
+# are matched as whole words by routing.keywords.mentions(); a trailing "*"
+# makes a phrase match as a word prefix. "na" is deliberately not negative:
+# in "post kar do na" it means "please".
 AFFIRMATIVE_KEYWORDS: List[str] = [
-    "haan", "haa", "ha ", "yes", "kar do", "kardo", "confirm",
-    "post kar", "theek hai", "thik hai", "ok", "okay", "sahi hai",
-    "post karo", "chalo"
+    "haan", "haa", "ha", "han", "ji", "yes", "kar do", "kardo", "confirm*",
+    "post kar*", "theek hai", "thik hai", "ok", "okay", "sahi hai", "chalo",
+    "chalega", "done",
 ]
 NEGATIVE_KEYWORDS: List[str] = [
-    "nahi", "no", "cancel", "mat karo", "ruko", "rehne do", "abhi nahi"
+    "nahi", "nahin", "nhi", "no", "mat", "cancel*", "ruko", "rehne do", "abhi nahi", "mana",
 ]
 
 # Keyword fallback for extract_category_intent - only used if Gemini is
 # unreachable, same reasoning as every other classifier's keyword fallback
 # in this file.
 _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
-    "sarees": ["saree", "sari"],
-    "kurtis": ["kurti", "kurta"],
-    "suits": ["suit"],
-    "tops": ["top"],
-    "lehengas": ["lehenga", "lehnga"],
-    "dresses": ["dress"],
+    "sarees": ["saree*", "sari", "sariyan", "sadi*"],
+    "kurtis": ["kurti*", "kurta*"],
+    "suits": ["suit", "suits"],
+    "tops": ["top", "tops"],
+    "lehengas": ["lehenga*", "lehnga*"],
+    "dresses": ["dress", "dresses"],
 }
 
 _MORE_KEYWORDS: List[str] = ["aur", "kuch aur", "more", "another", "next", "baaki", "dikhao"]
@@ -67,8 +69,8 @@ _MORE_KEYWORDS: List[str] = ["aur", "kuch aur", "more", "another", "next", "baak
 # browse request (it's a return/purchase/specific-item message that merely
 # mentions a category in passing) - see extract_category_intent's docstring.
 _NON_BROWSE_KEYWORDS: List[str] = [
-    "wapas", "return", "exchange", "badalna", "refund", "kharab", "defect",
-    "order", "khareed", "pack kar", "confirm", "book", "lelo", "le lo", "isse", "isko", "iska"
+    "wapas", "waapis", "return*", "exchange*", "badal*", "refund*", "kharab", "defect*",
+    "order*", "khareed*", "pack kar*", "confirm*", "book*", "lelo", "le lo", "isse", "isko", "iska",
 ]
 
 _RETURNS_STAGE_LABELS: Dict[str, str] = {

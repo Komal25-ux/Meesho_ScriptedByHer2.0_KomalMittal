@@ -5,6 +5,7 @@ from backend.config import settings
 from backend.api.chat_router import router as chat_router
 from backend.api.ws_router import router as ws_router
 from backend.db.supabase_client import db_client
+from backend.api.limits import BodySizeLimit
 
 # Initialize Logging
 logging.basicConfig(
@@ -21,14 +22,20 @@ app = FastAPI(
     version="2.5"
 )
 
-# CORS setup for Vite frontend integration
+# Only the deployed frontend and local dev may call the API from a browser.
+# No cookies or auth headers are used, so credentials stay off.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify settings.FRONTEND_URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+    expose_headers=["Server-Timing", "Retry-After"],
 )
+
+# Added last so it runs first: an oversized body is refused before any
+# other middleware or route touches it.
+app.add_middleware(BodySizeLimit, max_bytes=settings.MAX_REQUEST_BYTES)
 
 # Register routes
 app.include_router(chat_router, prefix="/api/v1")

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 210" width="1200" height="210" role="img" aria-labelledby="ft-t">
+  <title id="ft-t">Made by Komal Mittal for Bharat's 1.7 crore Meesho resellers</title>
+  <defs>
+    <linearGradient id="ft-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B0A19"/><stop offset="1" stop-color="#11050F"/></linearGradient>
+    <radialGradient id="ft-glow" cx="50%" cy="100%" r="70%"><stop offset="0" stop-color="#9F2089" stop-opacity=".6"/><stop offset="1" stop-color="#4A1445" stop-opacity="0"/></radialGradient>
+    <filter id="ft-glowf" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <linearGradient id="ft-line" gradientUnits="userSpaceOnUse" x1="140" y1="0" x2="1060" y2="0"><stop offset="0" stop-color="#9F2089" stop-opacity="0"/><stop offset=".5" stop-color="#FC8B16"/><stop offset="1" stop-color="#9F2089" stop-opacity="0"/></linearGradient>
+  </defs>
+  <style>
+    .ft-serif { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif; }
+    .ft-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .ft-sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .ft-name { stroke: #FFBE76; stroke-width: 1; fill: #FFBE76; fill-opacity: 0; stroke-dasharray: 600; stroke-dashoffset: 600; animation: ft-write 3.2s cubic-bezier(.65,0,.35,1) .3s forwards; }
+    .ft-rule { stroke-dasharray: 920; stroke-dashoffset: 920; animation: ft-draw 2.2s cubic-bezier(.65,0,.35,1) 1.4s forwards; }
+    .ft-in { animation: ft-in 1.2s ease 2.4s both; }
+    @keyframes ft-write { 70% { stroke-dashoffset: 0; fill-opacity: 0; } 100% { stroke-dashoffset: 0; fill-opacity: 1; } }
+    @keyframes ft-draw { to { stroke-dashoffset: 0; } }
+    @keyframes ft-in { from { opacity: 0; } to { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .ft-name { animation: none; stroke-dashoffset: 0; fill-opacity: 1; } .ft-rule { animation: none; stroke-dashoffset: 0; } .ft-in { animation: none; } }
+  </style>
+  <rect width="1200" height="210" rx="20" fill="url(#ft-bg)"/>
+  <rect width="1200" height="210" rx="20" fill="url(#ft-glow)"/>
+  <rect x=".5" y=".5" width="1199" height="209" rx="19.5" fill="none" stroke="#E27BD0" stroke-opacity=".2"/>
+  <rect x="10" y="10" width="1180" height="190" rx="13" fill="none" stroke="#F43397" stroke-opacity=".22" stroke-dasharray="5 6"/>
+  <text class="ft-sans ft-name" x="600" y="96" text-anchor="middle" font-size="64" font-weight="300">सखी</text>
+  <path class="ft-rule" d="M140 124 H1060" stroke="url(#ft-line)" stroke-dasharray="6 6"/>
+  <g class="ft-in">
+    <text class="ft-serif" x="600" y="160" text-anchor="middle" font-size="19" font-style="italic" fill="#FCF2F9">Made by Komal Mittal for Bharat's 1.7 crore Meesho resellers.</text>
+    <text class="ft-mono" x="600" y="186" text-anchor="middle" font-size="10.5" letter-spacing="3" fill="#C2A9BC">MEESHO SCRIPTEDBY{HER} 2.0 · AGENTIC AI FOR BHARAT</text>
+  </g>
+</svg>

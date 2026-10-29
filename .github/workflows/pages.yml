@@ -1,0 +1,41 @@
+name: Launch film page
+
+# Publishes .github/readme/watch.html with the launch film to GitHub Pages,
+# so the README's film preview opens a page that plays it (hover to preview, click for sound).
+on:
+  push:
+    branches: [main]
+    paths: [".github/readme/watch.html", ".github/readme/sakhi-launch.mp4", ".github/readme/poster.jpg", ".github/workflows/pages.yml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the watch page
+        run: |
+          mkdir -p _site
+          cp .github/readme/watch.html _site/index.html
+          cp .github/readme/sakhi-launch.mp4 .github/readme/poster.jpg _site/
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
